@@ -7,11 +7,21 @@ import matplotlib.pyplot as plt
 
 def analyze(frames, return_signals=False):
     """
-    Forensic rPPG Analysis refined with User Feedback:
-    - POS Method for robust pulse extraction.
-    - HRV Drift (StDev) threshold increased to 2.0 to account for compression noise.
-    - G/R Spectral Ratio prioritized as a strong human indicator.
-    - SNR < 2.0 returns "Inconclusive" (0.5).
+    Forensic rPPG Analysis for Deepfake Detection.
+    
+    This function is designed to be imported into main.py or a web backend.
+    
+    Args:
+        frames (list): A list of NumPy arrays (BGR frames) to analyze.
+        return_signals (bool): If True, returns auxiliary signal data for plotting.
+        
+    Returns:
+        float: A deepfake score from 0.0 (Human) to 1.0 (AI). 0.5 = Inconclusive.
+        dict (optional): Forensic metrics if return_signals=True.
+        
+    Integration Example:
+        from py_file.rppg_detector import analyze
+        score = analyze(captured_frames)
     """
     if not frames or len(frames) < 150:
         return (0.5, None) if return_signals else 0.5
@@ -90,32 +100,18 @@ def analyze(frames, return_signals=False):
     snr = np.max(mags[band_mask]) / np.mean(mags[band_mask])
 
     # --- REFINED VERDICT LOGIC ---
-    
-    # 1. Quality Check (Inconclusive if SNR too low)
     if snr < 2.0:
         score = 0.5
     else:
-        # 2. Bio-Consistency Check
-        # Human criteria:
-        # - Stronger Green Pulse (Ratio > 1.15)
-        # - Moderate Drift (0.5 < Drift < 6.0)
-        # - SNR > 2.0
-        
         is_human = (gr_ratio > 1.15) and (0.4 < bpm_drift < 8.0)
-        
         if is_human:
-            # Score scales: Better ratio and reasonable drift = lower deepfake score
             score = max(0.0, 0.3 - (gr_ratio - 1.15) - (snr * 0.01))
-            # Penalize the score if drift is extremely low (AI perfection)
             if bpm_drift < 0.3: score += 0.4
         else:
-            # Deepfake markers:
-            # - Ratio near 1.0 (BVP noise is grayscale)
-            # - Drift is near 0.0 (too static)
             score = 0.85
             if gr_ratio < 1.05: score += 0.1
             if bpm_drift < 0.3: score += 0.1
-            if snr > 20.0: score = 0.98 # Synthetic perfection
+            if snr > 20.0: score = 0.98
 
     tags = {
         "raw": G, "filtered": bvp_signal, "fft_xf": xf * 60, "fft_yf": mags,
@@ -124,6 +120,7 @@ def analyze(frames, return_signals=False):
     return float(np.clip(score, 0.0, 1.0)), tags if return_signals else float(np.clip(score, 0.0, 1.0))
 
 def plot_report(signals, score):
+    """Generates a visual forensic report for debugging."""
     if not signals: return
     plt.figure(figsize=(10, 8))
     plt.subplot(3, 1, 1)
@@ -158,6 +155,7 @@ if __name__ == "__main__":
     root.withdraw()
     root.attributes("-topmost", True)
     print("Persona rPPG Forensic Detector [v3.0 - Refined]")
+    print("Individual Test Mode Active.")
     video_path = filedialog.askopenfilename(title="Select Video to Verify")
     if video_path:
         cap = cv2.VideoCapture(video_path)
