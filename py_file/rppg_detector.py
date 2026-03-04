@@ -7,21 +7,10 @@ import matplotlib.pyplot as plt
 
 def analyze(frames, return_signals=False):
     """
-    Forensic rPPG Analysis for Deepfake Detection.
-    
-    This function is designed to be imported into main.py or a web backend.
-    
-    Args:
-        frames (list): A list of NumPy arrays (BGR frames) to analyze.
-        return_signals (bool): If True, returns auxiliary signal data for plotting.
-        
-    Returns:
-        float: A deepfake score from 0.0 (Human) to 1.0 (AI). 0.5 = Inconclusive.
-        dict (optional): Forensic metrics if return_signals=True.
-        
-    Integration Example:
-        from py_file.rppg_detector import analyze
-        score = analyze(captured_frames)
+    Forensic rPPG Analysis refined for High-Motion and Cam Capture.
+    - POS Method for robust pulse extraction.
+    - Broad Drift Threshold (up to 15.0) for natural movement.
+    - G/R Ratio (>1.15) as the primary biometric fingerprint.
     """
     if not frames or len(frames) < 150:
         return (0.5, None) if return_signals else 0.5
@@ -99,19 +88,26 @@ def analyze(frames, return_signals=False):
     peak_bpm = xf[band_mask][np.argmax(mags[band_mask])] * 60
     snr = np.max(mags[band_mask]) / np.mean(mags[band_mask])
 
-    # --- REFINED VERDICT LOGIC ---
-    if snr < 2.0:
+    # --- REFINED VERDICT LOGIC (v4.1) ---
+    if snr < 1.8: 
         score = 0.5
     else:
-        is_human = (gr_ratio > 1.15) and (0.4 < bpm_drift < 8.0)
+        # HUMAN criteria:
+        # 1. Reliable G/R ratio (Primary marker)
+        # 2. Reasonable drift (Broadened to 15.0 for motion noise)
+        is_human = (gr_ratio > 1.15) and (0.3 < bpm_drift < 18.0) # Even more lenient for noisy cam
+        
+        # Confident Biometric Marker
+        if gr_ratio > 1.30: is_human = True 
+
         if is_human:
-            score = max(0.0, 0.3 - (gr_ratio - 1.15) - (snr * 0.01))
-            if bpm_drift < 0.3: score += 0.4
+            score = max(0.0, 0.25 - (gr_ratio - 1.15) * 0.5)
+            if bpm_drift < 0.2: score += 0.4
         else:
             score = 0.85
             if gr_ratio < 1.05: score += 0.1
-            if bpm_drift < 0.3: score += 0.1
-            if snr > 20.0: score = 0.98
+            if bpm_drift < 0.2: score += 0.1
+            if snr > 25.0: score = 0.98
 
     tags = {
         "raw": G, "filtered": bvp_signal, "fft_xf": xf * 60, "fft_yf": mags,
@@ -120,59 +116,149 @@ def analyze(frames, return_signals=False):
     return float(np.clip(score, 0.0, 1.0)), tags if return_signals else float(np.clip(score, 0.0, 1.0))
 
 def plot_report(signals, score):
-    """Generates a visual forensic report for debugging."""
+    """Generates a visual forensic report."""
     if not signals: return
-    plt.figure(figsize=(10, 8))
-    plt.subplot(3, 1, 1)
-    plt.plot(signals["filtered"], color='red')
-    plt.title(f"Step C: POS Pulse Extraction\nBVP Strength Ratio: {signals['gr_ratio']:.2f} (Human > 1.15)")
-    
-    plt.subplot(3, 1, 2)
-    plt.plot(signals["fft_xf"], signals["fft_yf"], color='blue')
-    plt.axvline(x=signals["bpm"], color='orange', linestyle='--')
-    plt.title(f"Step D: FFT Spectrum Analysis\nPulse BPM: {signals['bpm']:.1f} | SNR: {signals['snr']:.2f}")
-    plt.xlim(40, 160)
-    
-    plt.subplot(3, 1, 3)
-    plt.bar(["BPM Drift", "G/R Ratio"], [signals["drift"], signals["gr_ratio"]], color=['orange', 'green'])
-    plt.axhline(y=1.15, color='black', linestyle='--', label='Ratio Threshold')
-    plt.title(f"Forensic Indicators\nVerdict is Inconclusive if SNR < 2.0")
-    plt.ylim(0, max(2.5, signals["gr_ratio"] + 0.5))
-    
-    if score == 0.5:
-        label = "INCONCLUSIVE (Low Quality)"
-    else:
-        label = "DEEPFAKE" if score > 0.5 else "HUMAN"
+    try:
+        plt.figure(figsize=(10, 8))
+        plt.subplot(3, 1, 1)
+        plt.plot(signals["filtered"], color='red')
+        plt.title(f"Forensic BVP Projection\nG/R Ratio: {signals['gr_ratio']:.2f} (Human > 1.15)")
         
-    plt.suptitle(f"Refined Forensic rPPG Report\nResult: {label} (Score: {score:.4f})", fontsize=14)
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.show()
+        plt.subplot(3, 1, 2)
+        plt.plot(signals["fft_xf"], signals["fft_yf"], color='blue')
+        plt.axvline(x=signals["bpm"], color='orange', linestyle='--')
+        plt.title(f"Frequency Analysis\nBPM: {signals['bpm']:.1f} | SNR: {signals['snr']:.2f}")
+        plt.xlim(40, 160)
+        
+        plt.subplot(3, 1, 3)
+        plt.bar(["BPM Drift", "G/R Ratio"], [signals["drift"], signals["gr_ratio"]], color=['orange', 'green'])
+        plt.axhline(y=1.15, color='black', linestyle='--')
+        plt.title(f"Bio-Forensic Indicators (Drift human range: 0.5 - 18.0)")
+        plt.ylim(0, max(2.5, signals["gr_ratio"] + 0.5))
+        
+        if score == 0.5:
+            label = "INCONCLUSIVE"
+        else:
+            label = "DEEPFAKE" if score > 0.5 else "HUMAN"
+            
+        plt.suptitle(f"Persona rPPG Forensic Report [v4.1]\nResult: {label} (Score: {score:.4f})", fontsize=14)
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        plt.show()
+    except Exception as e:
+        print(f"Warning: Could not display report graph ({e})")
+
+def run_webcam():
+    """Captures 10 seconds of live video for analysis."""
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("Error: Could not access webcam.")
+        return
+        
+    print("\n--- Live Webcam Capture ---")
+    print("Keep your face steady and well-lit.")
+    print("Press 'q' to stop early. Collecting 300 frames (~10s)...")
+    
+    frames = []
+    mp_face_mesh = mp.solutions.face_mesh
+    window_working = True
+    
+    with mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1) as face_mesh:
+        while len(frames) < 300:
+            ret, frame = cap.read()
+            if not ret: break
+            
+            # Fallback for systems with broken cv2.imshow
+            if window_working:
+                try:
+                    display_frame = frame.copy()
+                    results = face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                    if results.multi_face_landmarks:
+                        h, w, _ = frame.shape
+                        for idx in [117, 346]:
+                            lm = results.multi_face_landmarks[0].landmark[idx]
+                            cv2.circle(display_frame, (int(lm.x*w), int(lm.y*h)), 5, (0, 255, 0), -1)
+                        cv2.putText(display_frame, f"Capturing: {len(frames)}/300", (10, 30), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    else:
+                        cv2.putText(display_frame, "FACE NOT DETECTED", (10, 30), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    
+                    cv2.imshow("Persona Live Capture", display_frame)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
+                except Exception:
+                    window_working = False
+                    print("\nGUI window failed to open. Switching to Blind Capture Mode...")
+            
+            if not window_working:
+                if len(frames) % 30 == 0:
+                    print(f"Progress: {len(frames)}/300 frames collected...")
+            
+            frames.append(frame)
+                
+    cap.release()
+    try: cv2.destroyAllWindows()
+    except: pass
+    
+    if len(frames) >= 150:
+        print("\nAnalyzing live pulse...")
+        score, signals = analyze(frames, return_signals=True)
+        v_text = "INCONCLUSIVE" if score == 0.5 else ("DEEPFAKE" if score > 0.5 else "HUMAN")
+        print(f"--- Result: {v_text} (Score: {score:.4f}) ---")
+        plot_report(signals, score)
+    else:
+        print("Error: Not enough frames captured.")
 
 if __name__ == "__main__":
     import tkinter as tk
     from tkinter import filedialog
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    print("Persona rPPG Forensic Detector [v3.0 - Refined]")
-    print("Individual Test Mode Active.")
-    video_path = filedialog.askopenfilename(title="Select Video to Verify")
-    if video_path:
-        cap = cv2.VideoCapture(video_path)
-        frames = []
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret: break
-            frames.append(frame)
-            if len(frames) >= 600: break
-        cap.release()
-        if len(frames) > 150:
-            score, signals = analyze(frames, return_signals=True)
-            if score == 0.5:
-                v_text = "INCONCLUSIVE"
+    import sys
+
+    print("Persona rPPG Forensic Detector [v4.1]")
+    print("-" * 35)
+    print("1. Upload Video File")
+    print("2. Launch Live Webcam")
+    print("-" * 35)
+    
+    try:
+        # Handle choice without input() if possible for non-interactive shells
+        choice = input("Enter choice (1/2): ").strip()
+        
+        if choice == '1':
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            video_path = filedialog.askopenfilename(title="Select Video to Verify")
+            root.destroy()
+            
+            if video_path:
+                print(f"Processing: {video_path}")
+                cap = cv2.VideoCapture(video_path)
+                frames = []
+                while cap.isOpened():
+                    ret, frame = cap.read()
+                    if not ret: break
+                    frames.append(frame)
+                    if len(frames) >= 600: break
+                cap.release()
+                
+                if len(frames) > 150:
+                    score, signals = analyze(frames, return_signals=True)
+                    v_text = "INCONCLUSIVE" if score == 0.5 else ("DEEPFAKE" if score > 0.5 else "HUMAN")
+                    print(f"\n--- Result: {v_text} (Score: {score:.4f}) ---")
+                    plot_report(signals, score)
+                else: 
+                    print("Error: Video too short (Need at least 150 frames).")
             else:
-                v_text = "DEEPFAKE" if score > 0.5 else "HUMAN"
-            print(f"\n--- Result: {v_text} ---")
-            print(f"Score: {score:.4f} | Drift: {signals['drift']:.2f} | G/R Ratio: {signals['gr_ratio']:.2f} | SNR: {signals['snr']:.2f}")
-            plot_report(signals, score)
-        else: print("Error: Video too short for reliable analysis.")
+                print("No file selected.")
+                
+        elif choice == '2':
+            run_webcam()
+        else:
+            print("Invalid choice.")
+            
+    except KeyboardInterrupt:
+        print("\nOperation cancelled by user.")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\nError: {e}")
