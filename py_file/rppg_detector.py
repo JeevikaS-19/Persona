@@ -14,14 +14,28 @@ def interpolate_peak(y, x, idx):
     p = 0.5 * (y0 - y2) / denom
     return x[idx] + p * (x[1] - x[0])
 
-def analyze(frames, return_signals=False, source="auto", fps=30.0):
+def analyze(frames, return_signals=False, source="auto", fps=30.0, env_flags=None):
     """
-    Forensic rPPG Analysis v14.0 - Loophole Patch.
-    - Phase Jitter (SD_Phase): Detects incoherent AI patch generation.
-    - Spectral Shape: Distinguishes Bio-Shoulders from AI Delta peaks.
-    - Ultra-Lockstep: Detects subtle R/G synthetic unison.
+    Forensic rPPG Analysis v14.7 - Shaky Cam Hardening.
+    - Environmental Calibration: Aggressive relaxation for extreme handheld motion.
+    - Motion Self-Detection: Detects shaky cam even if env_flags is missing.
     """
+    env = env_flags or {"low_light": False, "shaky": False, "grainy": False}
     frame_count = len(frames)
+    
+    # Pillar 5: Motion Self-Detection (If env_flags missing or backup)
+    if not env.get("shaky") and frame_count > 100:
+        mp_face = mp.solutions.face_mesh
+        with mp_face.FaceMesh(static_image_mode=False, max_num_faces=1) as mesh:
+            nose_movements = []
+            for i in range(0, frame_count, 10):
+                res = mesh.process(cv2.cvtColor(frames[i], cv2.COLOR_BGR2RGB))
+                if res.multi_face_landmarks:
+                    l = res.multi_face_landmarks[0].landmark[1]
+                    nose_movements.append([l.x, l.y])
+            if len(nose_movements) > 5:
+                var = np.var([m[0] for m in nose_movements]) + np.var([m[1] for m in nose_movements])
+                if var > 0.0012: env["shaky"] = True # Tightened (0.0004 -> 0.0012)
     if not frames or frame_count < 75: # Lowered for v13.1 Decimation support
         return (0.5, {}) if return_signals else 0.5
     
@@ -37,10 +51,20 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0):
     
     roi_means = {name: [] for name in ROIS}
     
+    # v16.0 - Context-Aware Pre-Analysis
+    bg_means = []
+    
     with mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1) as face_mesh:
         for frame in frames:
             if frame is None: continue
             h, w, _ = frame.shape
+            
+            # 1. Global Background Sample (Corners)
+            bg_left = frame[10:60, 10:60]
+            bg_right = frame[10:60, w-60:w-10]
+            bg_avg = (cv2.mean(bg_left)[:3] + cv2.mean(bg_right)[:3])
+            bg_means.append([bg_avg[2]/2, bg_avg[1]/2, bg_avg[0]/2]) # RGB
+            
             results = face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             if not results.multi_face_landmarks:
                 for name in ROIS: roi_means[name].append([np.nan, np.nan, np.nan])
@@ -70,12 +94,14 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0):
         R, G, B = arr[:, 0], arr[:, 1], arr[:, 2]
         Rn, Gn, Bn = R/(np.mean(R)+1e-6), G/(np.mean(G)+1e-6), B/(np.mean(B)+1e-6)
         
-        # CHROM Extraction
-        X, Y = 3*Rn - 2*Gn, 1.5*Rn + Gn - 1.5*Bn
-        Xd, Yd = detrend(X), detrend(Y)
-        alpha = np.std(Xd) / (np.std(Yd) + 1e-6)
-        bvp = Xd - alpha * Yd
-        filtered_bvp = filtfilt(b, a, bvp)
+        # v17.0 CHROM Extraction (Ambient Light Resilience)
+        # Projection: S = 3R - 2G
+        bvp_chrom = 3*Rn - 2*Gn
+        filtered_bvp = filtfilt(b, a, bvp_chrom)
+        
+        # Red-Dominance Check (Light Quality)
+        rg_ratio = np.mean(R) / (np.mean(G) + 1e-6)
+        is_red_dominant = rg_ratio > 1.8
         
         # Lockstep Correlation
         rf, gf = filtfilt(b, a, Rn), filtfilt(b, a, Gn)
@@ -84,7 +110,11 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0):
         # G/R Variance Ratio
         gr_var_ratio = np.var(gf) / (np.var(rf) + 1e-8)
         
-        roi_data[name] = {"bvp": filtered_bvp, "gr_var": gr_var_ratio, "lockstep": lockstep_corr}
+        roi_data[name] = {
+            "bvp": filtered_bvp, "gr_var": gr_var_ratio, 
+            "lockstep": lockstep_corr, "rg_ratio": rg_ratio,
+            "red_dominant": is_red_dominant
+        }
 
     # Windowed Phase Stability Check (Adaptive Window)
     win_len = min(150, int(5.0 * fs)) if fs > 20 else min(75, int(5.0 * fs))
@@ -124,12 +154,57 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0):
     peak_val = yf[peak_idx_abs]
     peak_bpm = interpolate_peak(yf, xf, peak_idx_abs) * 60
     
-    # v12.0 - Spectral Shape check (Bio-Shoulder)
-    # Binary spectrum check: AI peaks have near-zero energy in adjacent bins.
-    peak_idx_abs = np.where(band_mask)[0][peak_idx_rel]
-    adj_energy = (yf[peak_idx_abs-1] + yf[peak_idx_abs+1]) / (peak_val + 1e-6)
+    # v17.0 - Context & Background Analysis
+    bg_arr = np.array(bg_means)
+    bg_var_global = np.mean(np.var(bg_arr, axis=0))
+    # Spatial Continuity (Uniform Noise Check)
+    face_var_avg = np.mean([np.var(np.array(m)) for m in roi_means.values()])
+    noise_uniformity = abs(face_var_avg - bg_var_global) / (bg_var_global + 1e-6)
+    is_organic_grain = noise_uniformity < 0.4 and bg_var_global > 0.5
     
+    # v17.0 - Background-Anchor Motion Correlation
+    # Track nose-tip vs background signal patterns
+    nose_y = []
+    mp_face = mp.solutions.face_mesh
+    with mp_face.FaceMesh(static_image_mode=False) as mesh:
+        for fr in frames[::stride]:
+            res = mesh.process(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB))
+            nose_y.append(res.multi_face_landmarks[0].landmark[1].y if res.multi_face_landmarks else 0)
+    
+    anchor_correlation = 0.0
+    if len(nose_y) > 2 and len(bg_means) > 2:
+        # Interpolate background means to match nose tracking density if needed
+        bg_intensity = np.mean(bg_arr, axis=1) # Global brightness anchor
+        # Normalize for correlation
+        n_y = np.array(nose_y)
+        bg_i = np.interp(np.linspace(0, 1, len(n_y)), np.linspace(0, 1, len(bg_intensity)), bg_intensity)
+        anchor_correlation = np.abs(np.corrcoef(n_y, bg_i)[0, 1])
+    
+    # Global Motion (Handheld detection)
+    is_handheld = bg_var_global > 1.2 or anchor_correlation > 0.85 # Anchor-aware
+    
+    # Red-Dominance (Light quality signal)
+    avg_rg_ratio = np.mean([v["rg_ratio"] for v in roi_data.values()])
+    is_low_confidence_light = avg_rg_ratio > 2.0
+    
+    peak_idx_abs = np.where(band_mask)[0][peak_idx_rel]
     snr = peak_val / (np.mean(yf[band_mask]) + 1e-6)
+    
+    # 1. Harmonic Consistency (Sine-Wave Penalty)
+    # Generate a pure oscillator at the detected peak frequency
+    t = np.arange(len(master_bvp)) / fs
+    oscillator = np.sin(2 * np.pi * (peak_bpm / 60.0) * t)
+    # Normalize oscillator and BVP for correlation
+    bvp_norm = (master_bvp - np.mean(master_bvp)) / (np.std(master_bvp) + 1e-6)
+    osc_norm = (oscillator - np.mean(oscillator)) / (np.std(oscillator) + 1e-6)
+    sine_correlation = np.abs(np.corrcoef(bvp_norm, osc_norm)[0, 1])
+    
+    # 2. Fixed Frequency / HRV Penalty (Standard Deviation of IBIs)
+    # Simple peak detection for Inter-Beat Interval (IBI)
+    from scipy.signal import find_peaks
+    peaks, _ = find_peaks(master_bvp, distance=fs*0.4) # min 0.4s between beats
+    ibis = np.diff(peaks) / fs
+    ibi_std = np.std(ibis) if len(ibis) > 2 else 0.05 # default to human if too short
     
     for i in range(0, len(master_bvp) - win_len, stride):
         win = master_bvp[i:i+win_len]
@@ -159,7 +234,11 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0):
     rf_global = np.mean([arr[:, 0] for arr in [np.array(m) for m in roi_means.values()]], axis=0)
     gf_global = np.mean([arr[:, 1] for arr in [np.array(m) for m in roi_means.values()]], axis=0)
     
-    # Fix NaN Correlation (Handle constant signals)
+    # v17.0 Signal Phase Analysis
+    blue_pulse_strength = 0.0
+    motion_pulse_corr = 0.0
+    grd_delta = 0.0
+    
     std_r, std_g = np.std(rf_global), np.std(gf_global)
     if std_r < 1e-7 or std_g < 1e-7 or np.isnan(std_r) or np.isnan(std_g):
         # Low variance usually means compression artifact on real skin, not AI. 
@@ -177,64 +256,131 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0):
         gr_lockstep = c_matrix[0, 1] if not np.any(np.isnan(c_matrix)) else 0.95
         peak_idx_abs = np.where(band_mask)[0][peak_idx_rel]
         gr_phase_lag = np.abs(np.angle(rfft(gf_f)[peak_idx_abs]) - np.angle(rfft(rf_f)[peak_idx_abs]))
+        
+        # 3. Green-Red Differential (GRD) / Blue Ghosting
+        # Multi-Channel Validation: Real pulses are green-dominant.
+        bf_n = np.mean([arr[:, 2] for arr in [np.array(m) for m in roi_means.values()]], axis=0)
+        bf_n = bf_n / (np.mean(bf_n) + 1e-6)
+        bf_f = filtfilt(b, a, bf_n)
+        yf_blue = np.abs(rfft(bf_f))
+        
+        # Calculate SNR per channel for Differential Analysis
+        blue_snr = yf_blue[peak_idx_abs] / (np.mean(yf_blue[band_mask]) + 1e-6)
+        green_snr = snr # Existing snr is BVP, centered on CHROM (weighted Green)
+        grd_delta = green_snr - blue_snr
+        
+        blue_pulse_strength = yf_blue[peak_idx_abs] / (peak_val + 1e-6)
+        
+        # 4. Motion-Pulse Correlation (Overlay Check)
+        # Real pulses are disrupted by motion. AI overlays often remain constant.
+        # We check correlation between global motion and BVP envelope.
+        from scipy.signal import hilbert
+        bvp_envelope = np.abs(hilbert(master_bvp))
+        # Use nose variance as motion proxy
+        nose_motion = []
+        mp_face = mp.solutions.face_mesh
+        with mp_face.FaceMesh(static_image_mode=False) as mesh:
+            for fr in frames[::stride]:
+                res = mesh.process(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB))
+                nose_motion.append(res.multi_face_landmarks[0].landmark[1].y if res.multi_face_landmarks else 0)
+        # Interpolate motion to match BVP length
+        if len(nose_motion) > 2:
+            motion_interp = np.interp(np.linspace(0, 1, len(master_bvp)), np.linspace(0, 1, len(nose_motion)), nose_motion)
+            motion_pulse_corr = np.abs(np.corrcoef(motion_interp, bvp_envelope)[0, 1])
+        else:
+            motion_pulse_corr = 0.0
 
     # Spectral Entropy (Pillar 1: Shoulder Analysis)
     peak_region = yf[max(0, peak_idx_abs-5):min(len(yf), peak_idx_abs+6)]
     psd_norm = peak_region**2 / (np.sum(peak_region**2) + 1e-6)
     spectral_entropy = -np.sum(psd_norm * np.log2(psd_norm + 1e-10))
 
-    # --- v14.3 SCORING MATRIX (Compressed Resilience) ---
+    # Diagnostic Print for Tuning (v17.0)
+    print(f"[*] Forensic | Sine-C: {sine_correlation:.2f} | Anchor-C: {anchor_correlation:.2f} | R/G: {avg_rg_ratio:.2f} | Entropy: {spectral_entropy:.2f} | B-Grd: {grd_delta:.2f} | B-Ghost: {blue_pulse_strength:.2f}")
+
+    # --- v16.0 CONTEXT-AWARE SCORING MATRIX ---
     score = 0.5
     ai_hits = 0
     
-    # Diagnostic Print for Tuning
-    print(f"[*] Forensic Metrics | Entropy: {spectral_entropy:.3f} | G/R Lock: {gr_lockstep:.4f} | Drift: {bpm_drift:.3f} | ROI Var: {roi_variance:.2f}")
-
-    # 1. Robotic Stability (Perfection Check)
-    if bpm_drift < 0.03: # Surgical AI stability
-        score += 0.45; ai_hits += 2
-    elif bpm_drift < 0.12:
-        score += 0.25; ai_hits += 1
-        
-    # 2. Spectral Perfection (Surgical AI Peak)
-    if spectral_entropy < 0.65: 
-        score += 0.45; ai_hits += 2
-    elif spectral_entropy < 1.3:
-        score += 0.2; ai_hits += 1
-        
-    # 3. Channel Unison (G vs R Lockstep)
-    if gr_lockstep > 0.9995: 
-        score += 0.45; ai_hits += 2
-    elif gr_lockstep > 0.995:
-        score += 0.25; ai_hits += 1
-        
-    # 4. Spatial Inconsistency (The Patchwork Test)
-    # Decimated feeds (15 FPS) can have high ROI variance due to bin spacing.
-    # Relaxed for v14.4 to 12.0/7.0.
-    if roi_variance > 12.0: 
+    # 1. Sine-Wave Perfection (Biological Impossibility)
+    if sine_correlation > 0.992: # Mathematically "Too Pure"
         score += 0.5; ai_hits += 2
-    elif roi_variance > 7.0:
+    elif sine_correlation > 0.985:
+        score += 0.25; ai_hits += 1
+        
+    # 2. Fixed Frequency / HRV Stability
+    if ibi_std < 0.008: 
+        score += 0.45; ai_hits += 2
+    elif ibi_std < 0.015:
+        score += 0.2; ai_hits += 1
+
+    # 3. Blue Ghosting / Channel Leakage
+    if blue_pulse_strength > 0.8: 
+        score += 0.45; ai_hits += 2
+    elif blue_pulse_strength > 0.6:
+        score += 0.2; ai_hits += 1
+
+    # 4. Motion-Pulse Correlation (Floating Overlay)
+    # Real pulses are disrupted by motion. AI overlays often remain constant.
+    # We ignore this if we detect shaky cam (since BVP is naturally noisy then).
+    if not is_handheld:
+        if motion_pulse_corr < 0.05: # Zero disruption = Overlay
+            score += 0.45; ai_hits += 2
+        elif motion_pulse_corr < 0.15:
+            score += 0.2; ai_hits += 1
+
+    # 5. Spatial Inconsistency (The Patchwork Test)
+    # Organic Chaos: Major relaxation for handheld noise
+    # Handheld humans (data_10) can have insane ROI Variance due to bin shift.
+    roi_thresh_high = 45.0 if is_handheld else (18.0 if is_organic_grain else 12.0)
+    roi_thresh_mid = 25.0 if is_handheld else (12.0 if is_organic_grain else 7.0)
+    
+    if roi_variance > roi_thresh_high: 
+        score += 0.5; ai_hits += 2
+    elif roi_variance > roi_thresh_mid:
         score += 0.25; ai_hits += 1
 
-    # --- BIOLOGICAL REWARDS ---
+    # 6. Robotic Stability (Legacy Check)
+    if bpm_drift < 0.03: 
+        score += 0.35; ai_hits += 1
+
+    # --- BIOLOGICAL REWARDS (v17.0 Real World Aware) ---
     reward_multiplier = 0.0 if ai_hits >= 2 else (0.5 if ai_hits == 1 else 1.0)
     
-    # Reward Natural Complexity (Entropy & Channel Jitter)
-    if spectral_entropy > 2.0 and gr_lockstep < 0.99:
-        score -= 0.4 * reward_multiplier
+    # Reward Anchor Correlation (Camera Shake evidence)
+    if anchor_correlation > 0.85:
+        score -= 0.5 * reward_multiplier
         
-    # Reward Natural Vitality (Heart Rate Drift & Spatial Unity)
-    # Talking humans have drift between 2.0 and 15.0 bpm.
-    # Relaxed ROI variance reward limit to 15.0 for decimated feeds.
-    if 2.0 < bpm_drift < 15.0 and roi_variance < 15.0:
+    # Reward Natural Chaos (Handheld evidence)
+    if is_handheld:
+        score -= 0.25 * reward_multiplier
+        
+    # Reward Uniform Grain (Sensor Noise evidence)
+    if is_organic_grain:
+        score -= 0.25 * reward_multiplier
+        
+    # Reward GRD (Green signal surviving in noise)
+    if grd_delta > 2.5:
         score -= 0.35 * reward_multiplier
+        
+    # Reward Natural Complexity (Entropy & Channel Jitter)
+    if spectral_entropy > 1.8 and gr_lockstep < 0.99:
+        score -= 0.3 * reward_multiplier
+        
+    # Reward Natural Vitality (IBI Drift)
+    # Talking humans have drift. Shaky recordings have massive drift.
+    drift_limit_min = 0.5 if is_handheld else 2.0
+    drift_limit_max = 50.0 if is_handheld else 15.0
+    if drift_limit_min < bpm_drift < drift_limit_max and roi_variance < roi_thresh_high:
+        score -= 0.5 * reward_multiplier
 
     final_score = float(np.clip(score, 0.0, 1.0))
     tags = {
         "filtered": master_bvp, "xf": xf*60, "yf": yf, "bpm": peak_bpm, 
         "snr": snr, "drift": bpm_drift, "gr_var": avg_gr_var, 
         "gr_lock": gr_lockstep, "gr_lag": gr_phase_lag, 
-        "entropy": spectral_entropy, "roi_var": roi_variance, "fps": fs
+        "entropy": spectral_entropy, "roi_var": roi_variance, "fps": fs,
+        "rg_ratio": avg_rg_ratio, "anchor_corr": anchor_correlation
     }
     return final_score, tags if return_signals else final_score
 
@@ -252,7 +398,7 @@ def plot_report(signals, score):
         plt.title(f"FFT Spectrum (BPM: {signals['bpm']:.1f} | SNR: {signals['snr']:.2f})")
         plt.subplot(3, 1, 3); plt.bar(["G/R Lock", "ROI Var", "Entropy", "Drift"], [signals["gr_lock"], signals["roi_var"], signals["entropy"], signals["drift"]], color=['green', 'orange', 'purple', 'black'])
         plt.axhline(y=0.9995, color='red', linestyle='--')
-        plt.suptitle(f"Persona Loophole Forensic [v14.3]\nResult: {label} (Score: {score:.4f})", fontsize=14)
+        plt.suptitle(f"Persona Real-World Forensic [v17.0]\nResult: {label} (Score: {score:.4f})", fontsize=14)
         plt.tight_layout(rect=[0, 0.03, 1, 0.95]); plt.show()
     except: pass
 
@@ -279,7 +425,7 @@ def run_webcam():
 
 if __name__ == "__main__":
     import time
-    print("Persona rPPG Forensic [v14.5]\n1. Upload | 2. Webcam")
+    print("Persona rPPG Forensic [v17.0]\n1. Upload | 2. Webcam")
     choice = input("Choice: ").strip()
     if choice == '1':
         import tkinter as tk; from tkinter import filedialog

@@ -12,6 +12,51 @@ from pathlib import Path
 from rppg_detector import analyze as analyze_rppg
 from sync_detector import analyze as analyze_sync
 from moviepy.video.io.VideoFileClip import VideoFileClip
+import mediapipe as mp
+
+class EnvironmentalAnalyzer:
+    """Detects organic chaos: Motion, ISO Grain, and Luminance."""
+    @staticmethod
+    def analyze_environment(frames):
+        if not frames: return {"low_light": False, "shaky": False, "grainy": False, "lux": 100}
+        
+        # 1. Luminance Check
+        lux_values = [np.mean(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)) for f in frames[::10]]
+        avg_lux = np.mean(lux_values)
+        is_low_light = avg_lux < 45 # Threshold 45/255
+        
+        # 2. Motion Analysis (Shaky Cam)
+        mp_face_mesh = mp.solutions.face_mesh
+        face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1)
+        nose_tips = []
+        for f in frames[::5]:
+            res = face_mesh.process(cv2.cvtColor(f, cv2.COLOR_BGR2RGB))
+            if res.multi_face_landmarks:
+                l = res.multi_face_landmarks[0].landmark[1] # Nose tip
+                nose_tips.append([l.x, l.y])
+        
+        shaky = False
+        if len(nose_tips) > 10:
+            variance = np.var([nt[0] for nt in nose_tips]) + np.var([nt[1] for nt in nose_tips])
+            shaky = variance > 0.0012 # Tightened (0.0005 -> 0.0012) to avoid false positives on subtle head tilt
+            
+        # 3. Sensor Noise Check (Grain)
+        # Check background Laplacian variance (outside face region)
+        try:
+            sample_frame = frames[len(frames)//2]
+            gray = cv2.cvtColor(sample_frame, cv2.COLOR_BGR2GRAY)
+            # Use top-left corner as background sample
+            bg_sample = gray[50:150, 50:150]
+            laplacian_var = cv2.Laplacian(bg_sample, cv2.CV_64F).var()
+            grainy = laplacian_var > 150 # High Laplacian var in static BG = Grain
+        except: grainy = False
+        
+        return {
+            "low_light": bool(is_low_light), 
+            "shaky": bool(shaky), 
+            "grainy": bool(grainy), 
+            "lux": float(round(avg_lux, 1))
+        }
 
 # --- Pillar 4: Security & Hygiene ---
 logging.basicConfig(
@@ -97,6 +142,10 @@ async def analyze_video_production(video_path):
             if audio.shape[1] > 1: audio = audio.mean(axis=1) # Mono
             sr = 22050
             
+            # ENVIRONMENTAL CALIBRATION (NEW)
+            env = EnvironmentalAnalyzer.analyze_environment(frames)
+            logger.info(f"Environment: {env}")
+            
             # Pillar 1: Asynchronous Parallelism (launch both simultaneously)
             # We run the heavy compute in threads to avoid blocking the event loop
             # Pillar 1 & 3: Audio Silence Handling
@@ -108,7 +157,7 @@ async def analyze_video_production(video_path):
             fps_full = len(frames) / duration
             fps_decimated = fps_full / 2.0
             
-            rppg_task = asyncio.to_thread(analyze_rppg, frames, return_signals=True, fps=fps_full)
+            rppg_task = asyncio.to_thread(analyze_rppg, frames, return_signals=True, fps=fps_full, env_flags=env)
             
             # Only run sync if there's audio energy (use decimated slice)
             if not is_silent:
@@ -125,13 +174,43 @@ async def analyze_video_production(video_path):
             rppg_tags = rppg_tags or {}
             sync_tags = sync_tags or {}
 
-            # Weighted Ensembling (Adaptive Weighting)
-            if is_silent:
-                ensemble_score = rppg_score # 100% rPPG for silent videos
+            # v17.0 REAL-WORLD HARDENING
+            is_consensus_fake = (rppg_score > 0.85 and sync_score > 0.85)
+            
+            # Extract new v17.0 tags
+            rgv = rppg_tags.get("rg_ratio", 1.0)
+            anc = rppg_tags.get("anchor_corr", 0.0)
+            
+            # Update environment flags based on specialized rPPG analysis
+            if anc > 0.85: env["shaky"] = True
+            if rgv > 2.0: env["grainy"] = True # Use grainy/organic as proxy for red-dominance
+
+            # Adaptive Weighting (Organic Chaos)
+            if env["low_light"]:
+                ensemble_score = (rppg_score * 0.2) + (sync_score * 0.8)
+                audit_type = "LOW-LIGHT ADAPTIVE AUDIT"
+            elif env["shaky"] or env["grainy"] or rgv > 1.8:
+                # Handheld/Grainy/Orange real videos
+                # Directive: 60% rPPG, 40% Lip-Sync if R/G > 2.0
+                ensemble_score = (rppg_score * 0.6) + (sync_score * 0.4)
+                # Apply "Chaos Discount" only if no consensus deepfake is detected
+                if (env["shaky"] or anc > 0.85) and not is_consensus_fake: 
+                    ensemble_score -= 0.4
+                audit_type = "ORGANIC CHAOS AUDIT"
+            elif is_silent:
+                ensemble_score = rppg_score 
                 audit_type = "AUDIO-AGNOSTIC BIOMETRIC AUDIT"
             else:
                 ensemble_score = (rppg_score * 0.6) + (sync_score * 0.4)
                 audit_type = "FULL MULTI-MODAL FORENSIC AUDIT"
+                
+            # Final threshold relaxation if ORGANIC
+            ensemble_score = float(np.clip(ensemble_score, 0.0, 1.0))
+            classification = "DEEPFAKE" if ensemble_score > 0.5 else "HUMAN"
+            
+            # REFINED RELAXATION: Only relax if there's no consensus fake and score is borderline
+            if (env["shaky"] or env["grainy"]) and ensemble_score < 0.65 and not is_consensus_fake:
+                classification = "HUMAN" # Narrowed window (0.75 -> 0.65)
             
             execution_time = time.time() - start_time
             
@@ -145,8 +224,9 @@ async def analyze_video_production(video_path):
                     "ensemble_score": round(ensemble_score, 4),
                     "rppg_score": round(rppg_score, 4),
                     "sync_score": round(sync_score, 4),
-                    "classification": "DEEPFAKE" if ensemble_score > 0.5 else "HUMAN"
+                    "classification": classification
                 },
+                "environment": env,
                 "forensics": {
                     "bpm": round(rppg_tags.get("bpm", 0) if rppg_tags else 0, 1),
                     "snr": round(rppg_tags.get("snr", 0) if rppg_tags else 0, 2),
@@ -175,8 +255,8 @@ async def demo_ui():
     from tkinter import filedialog
     
     print("-" * 50)
-    print("PERSONA PRODUCTION ENGINE v1.2")
-    print("Asynchronous | Hybrid-FPS | Bio-Fidelity")
+    print("PERSONA PRODUCTION ENGINE v2.0")
+    print("Asynchronous | Organic Chaos | Bio-Aware")
     print("-" * 50)
     
     root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
@@ -203,6 +283,9 @@ async def demo_ui():
         print("\n" + "="*50)
         print(f" FORENSIC AUDIT REPORT: {result['filename']}")
         print(f" MODE: {result.get('audit_mode', 'UNKNOWN')}")
+        env = result.get("environment", {})
+        env_str = f"[{'LOW LIGHT' if env.get('low_light') else 'OPTIMAL'}] [{'SHAKY' if env.get('shaky') else 'STATIC'}] [{'GRAINY' if env.get('grainy') else 'SMOOTH'}]"
+        print(f" ENV: {env_str}")
         print("="*50)
         
         print(f" VERDICT: {color}{cls}{reset} (Score: {m.get('ensemble_score', 0):.4f})")
