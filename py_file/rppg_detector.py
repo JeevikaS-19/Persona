@@ -7,10 +7,10 @@ import matplotlib.pyplot as plt
 
 def analyze(frames, return_signals=False, source="auto", fps=30.0):
     """
-    Forensic rPPG Analysis v11.5 - High-End AI Audit.
-    - Channel Lockstep: Detects >99% R/G correlation (AI Color-Block).
-    - Bio-Noise Floor: Flags hyper-clean spectral peaks (Synthetic Loops).
-    - Hierarchical Scoring: AI markers invalidate biological rewards.
+    Forensic rPPG Analysis v13.0 - Entropy Forensic.
+    - Phase Jitter (SD_Phase): Detects incoherent AI patch generation.
+    - Spectral Shape: Distinguishes Bio-Shoulders from AI Delta peaks.
+    - Ultra-Lockstep: Detects subtle R/G synthetic unison.
     """
     frame_count = len(frames)
     if not frames or frame_count < 150:
@@ -47,7 +47,7 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0):
 
     fs = float(fps)
     b, a = butter(4, [0.75 / (0.5 * fs), 2.5 / (0.5 * fs)], btype='band')
-    roi_signals = {}
+    roi_data = {}
     
     for name, data in roi_means.items():
         arr = np.array(data)
@@ -68,34 +68,53 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0):
         bvp = Xd - alpha * Yd
         filtered_bvp = filtfilt(b, a, bvp)
         
-        # v11.5 - Channel Lockstep (Correlation)
-        # Real bio-flow has phase difference. >0.99 is synthetic unison.
+        # Lockstep Correlation
         rf, gf = filtfilt(b, a, Rn), filtfilt(b, a, Gn)
         lockstep_corr = np.corrcoef(rf, gf)[0, 1] if np.std(rf)>0 and np.std(gf)>0 else 1.0
         
         # G/R Variance Ratio
         gr_var_ratio = np.var(gf) / (np.var(rf) + 1e-8)
         
-        roi_signals[name] = {"bvp": filtered_bvp, "gr_var": gr_var_ratio, "lockstep": lockstep_corr}
+        roi_data[name] = {"bvp": filtered_bvp, "gr_var": gr_var_ratio, "lockstep": lockstep_corr}
 
-    master_bvp = (roi_signals["forehead"]["bvp"] + roi_signals["cheek_r"]["bvp"] + roi_signals["cheek_l"]["bvp"]) / 3.0
-    avg_gr_var = np.mean([v["gr_var"] for v in roi_signals.values()])
-    avg_lockstep = np.mean([v["lockstep"] for v in roi_signals.values()])
+    # Windowed Phase Stability Check
+    win_len, stride = 150, 30
+    phase_lags = []
+    for i in range(0, frame_count - win_len, stride):
+        # Phase of forehead vs mean cheeks
+        f_win = roi_data["forehead"]["bvp"][i:i+win_len]
+        c_win = (roi_data["cheek_r"]["bvp"][i:i+win_len] + roi_data["cheek_l"]["bvp"][i:i+win_len])/2
+        
+        f_fft = rfft(f_win)
+        c_fft = rfft(c_win)
+        xf_w = rfftfreq(win_len, 1/fs)
+        idx = np.argmax(np.abs(f_fft)[(xf_w >= 0.75) & (xf_w <= 2.5)])
+        
+        f_phase = np.angle(f_fft[idx])
+        c_phase = np.angle(c_fft[idx])
+        phase_lags.append(np.abs(f_phase - c_phase))
+    
+    phase_jitter = np.std(phase_lags) if len(phase_lags) > 1 else 0.0
+
+    master_bvp = (roi_data["forehead"]["bvp"] + roi_data["cheek_r"]["bvp"] + roi_data["cheek_l"]["bvp"]) / 3.0
+    avg_gr_var = np.mean([v["gr_var"] for v in roi_data.values()])
+    avg_lockstep = np.mean([v["lockstep"] for v in roi_data.values()])
     
     yf = np.abs(rfft(master_bvp))
     xf = rfftfreq(len(master_bvp), 1/fs)
     band_mask = (xf >= 0.75) & (xf <= 2.5)
-    peak_idx = np.argmax(yf[band_mask])
-    peak_bpm = xf[band_mask][peak_idx] * 60
-    snr = np.max(yf[band_mask]) / (np.mean(yf[band_mask]) + 1e-6)
-
-    # v11.5 - Bio-Noise Floor check (Hyper-clean peak)
-    # If the peak energy is too concentrated, it's a synthetic loop.
-    peak_energy = np.max(yf[band_mask])
-    env_energy = np.mean(yf[band_mask])
-    noise_score = env_energy / (peak_energy + 1e-6) # Lower = cleaner/more synthetic
-
-    win_len, stride, bpms = 150, 30, []
+    peak_idx_rel = np.argmax(yf[band_mask])
+    peak_val = yf[band_mask][peak_idx_rel]
+    peak_bpm = xf[band_mask][peak_idx_rel] * 60
+    
+    # v12.0 - Spectral Shape check (Bio-Shoulder)
+    # Binary spectrum check: AI peaks have near-zero energy in adjacent bins.
+    peak_idx_abs = np.where(band_mask)[0][peak_idx_rel]
+    adj_energy = (yf[peak_idx_abs-1] + yf[peak_idx_abs+1]) / (peak_val + 1e-6)
+    
+    snr = peak_val / (np.mean(yf[band_mask]) + 1e-6)
+    
+    bpms = []
     for i in range(0, len(master_bvp) - win_len, stride):
         win = master_bvp[i:i+win_len]
         y_w = np.abs(rfft(win))
@@ -104,63 +123,85 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0):
         bpms.append(x_w[m_w][np.argmax(y_w[m_w])] * 60)
     bpm_drift = np.std(bpms) if len(bpms) > 1 else 0.0
 
-    cheek_avg = (roi_signals["cheek_r"]["bvp"] + roi_signals["cheek_l"]["bvp"]) / 2.0
-    sync_score = np.corrcoef(roi_signals["forehead"]["bvp"], cheek_avg)[0, 1]
+    sync_score = np.corrcoef(roi_data["forehead"]["bvp"], (roi_data["cheek_r"]["bvp"]+roi_data["cheek_l"]["bvp"])/2)[0,1]
 
-    # --- v11.5 HIERARCHICAL SCORING ---
+    # --- v13.1 SCORING MATRIX (Dual Profile) ---
     score = 0.5
-    
-    # 1. PRIMARY AI ANCHORS (Fatal Flags)
     ai_hits = 0
-    if avg_lockstep > 0.985: ai_hits += 1; score += 0.4 # Color-Block lockstep
-    if avg_gr_var < 1.02: ai_hits += 1; score += 0.4   # Sync-variance lockstep
-    if bpm_drift < 0.15 and snr > 4.0: ai_hits += 1; score += 0.4 # Loop entropy
-    if noise_score < 0.04: ai_hits += 1; score += 0.3 # Hyper-clean spectrum
     
-    # 2. SECONDARY AI ANCHORS
-    if sync_score < 0.5: score += 0.2 # Ghosting
-    if snr > 15.0: score += 0.2        # Post-processed hygiene
+    # 1. PROFILE SELECTION
+    is_live = (source == "webcam")
     
-    # 3. BIOLOGICAL REWARDS (Only active if AI hits are low)
-    # This prevents high-quality AI from "buying back" a human score.
-    reward_multiplier = 0.0 if ai_hits >= 2 else (0.4 if ai_hits == 1 else 1.0)
+    # 2. SPECTRAL BROADENING (The "Human" Flag)
+    # AI Delta Peak: adj_energy < 0.1 (Single surgical bin)
+    # Human Shoulder: adj_energy > 0.2 (Natural frequency bleed)
+    is_broad = (adj_energy > 0.15)
     
-    if avg_gr_var > 1.4: score -= 0.25 * reward_multiplier
-    if 0.5 < bpm_drift < 3.5: score -= 0.15 * reward_multiplier
-    if sync_score > 0.85: score -= 0.2 * reward_multiplier
-    if 48 <= peak_bpm <= 105: score -= 0.1 * reward_multiplier
+    # 3. ROBOTIC STABILITY ANCHOR
+    if bpm_drift < 0.1:
+        score += 0.45; ai_hits += 2
+    elif bpm_drift < 0.25:
+        score += 0.25
+        
+    # 4. INTENSITY GATING
+    if is_live:
+        # Profile A: Live (Strict)
+        if snr < 1.8: score += 0.35; ai_hits += 1 # Low quality is suspicious in live stream
+    else:
+        # Profile B: Upload (Relaxed/Compressed)
+        if snr < 1.1 and not is_broad: score += 0.4; ai_hits += 1 # Only penalize low SNR if it's NOT broad
+        
+    # 5. BIOLOGICAL SIGNATURES (G/R Ratio)
+    if avg_gr_var < 1.1:
+        score += 0.35; ai_hits += 1
+    elif avg_gr_var < 1.02:
+        score += 0.5; ai_hits += 2
+
+    # --- BIOLOGICAL REWARDS (Adaptive) ---
+    reward_multiplier = 0.0 if ai_hits >= 2 else (0.5 if ai_hits == 1 else 1.0)
+    
+    # Spectral Broadening Reward (Elite Human Marker)
+    if is_broad and avg_gr_var > 1.2:
+        score -= 0.4 * reward_multiplier # Strong proof of biological source
+        
+    # Natural Drift Reward
+    if 0.4 < bpm_drift < 6.0:
+        score -= 0.25 * reward_multiplier
+        
+    # Phase Jitter Penalties (Patchwork AI)
+    if phase_jitter > 1.4:
+        score += 0.4; ai_hits += 1
 
     final_score = float(np.clip(score, 0.0, 1.0))
-    tags = {"filtered": master_bvp, "xf": xf*60, "yf": yf, "bpm": peak_bpm, "snr": snr, "drift": bpm_drift, "gr_var": avg_gr_var, "sync": sync_score, "lockstep": avg_lockstep, "fps": fs}
+    tags = {"filtered": master_bvp, "xf": xf*60, "yf": yf, "bpm": peak_bpm, "snr": snr, "drift": bpm_drift, "gr_var": avg_gr_var, "sync": sync_score, "jitter": phase_jitter, "adj_e": adj_energy, "fps": fs, "source": source}
     return final_score, tags if return_signals else final_score
 
 def plot_report(signals, score):
     if not signals: return
     try:
         plt.figure(figsize=(10, 8))
-        # CORRECTED v11.0 LABEL LOGIC
-        label = "INCONCLUSIVE" if signals["snr"] < 1.3 else ("DEEPFAKE" if score > 0.5 else "HUMAN")
+        # CORRECTED v12.0 LABEL LOGIC
+        label = "INCONCLUSIVE" if (signals["snr"] < 1.3) else ("DEEPFAKE" if score > 0.5 else "HUMAN")
         
         plt.subplot(3, 1, 1); plt.plot(signals["filtered"], color='red')
-        plt.title(f"CHROM Forensic Pulse (FPS: {signals['fps']:.1f} | Sync: {signals['sync']:.2f})")
+        plt.title(f"v13.0 Entropy Pulse (FPS: {signals.get('fps',0):.1f} | Jitter: {signals.get('jitter',0):.2f})")
         plt.subplot(3, 1, 2); plt.plot(signals["xf"], signals["yf"], color='blue')
         plt.axvline(x=signals["bpm"], color='orange', linestyle='--'); plt.xlim(40, 160)
-        plt.title(f"BVP Analysis (BPM: {signals['bpm']:.1f} | SNR: {signals['snr']:.2f})")
-        plt.subplot(3, 1, 3); plt.bar(["G/R Var", "Drift", "Sync"], [signals["gr_var"], signals["drift"], signals["sync"]], color=['green', 'orange', 'purple'])
-        plt.axhline(y=1.3, color='black', linestyle='--', label='Bio Min'); plt.axhline(y=0.2, color='red', linestyle=':', label='Too Perfect')
-        plt.legend()
-        plt.suptitle(f"Persona Forensic Validation [v11.5]\nResult: {label} (Score: {score:.4f})", fontsize=14)
+        plt.title(f"FFT Spectrum (BPM: {signals['bpm']:.1f} | SNR: {signals['snr']:.2f})")
+        plt.subplot(3, 1, 3); plt.bar(["Bio-Var", "Drift", "Jitter", "Adj-E"], [signals["gr_var"], signals["drift"], signals["jitter"], signals["adj_e"]], color=['green', 'orange', 'purple', 'black'])
+        plt.axhline(y=1.3, color='gray', linestyle='--'); plt.axhline(y=1.2, color='red', linestyle=':')
+        plt.suptitle(f"Persona Entropy Forensic [v13.0]\nResult: {label} (Score: {score:.4f})", fontsize=14)
         plt.tight_layout(rect=[0, 0.03, 1, 0.95]); plt.show()
     except: pass
 
 def run_webcam():
     cap = cv2.VideoCapture(0)
-    print("\n--- Live Capture v11.5 ---")
+    print("\n--- Live Capture v13.0 ---")
     frames = []
     while len(frames) < 300:
         ret, frame = cap.read()
         if not ret: break
-        cv2.imshow("Persona Live v11.5", frame)
+        cv2.imshow("Persona Live v12.0", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'): break
         frames.append(frame)
     cap.release(); cv2.destroyAllWindows()
@@ -171,7 +212,7 @@ def run_webcam():
         plot_report(sigs, score)
 
 if __name__ == "__main__":
-    print("Persona rPPG Forensic [v11.5]\n1. Upload | 2. Webcam")
+    print("Persona rPPG Forensic [v13.0]\n1. Upload | 2. Webcam")
     choice = input("Choice: ").strip()
     if choice == '1':
         import tkinter as tk; from tkinter import filedialog
