@@ -21,17 +21,16 @@ def bandpass_filter(data, lowcut, highcut, fs, order=5):
 
 def analyze(frames, audio_data, sr=22050, fps=30.0):
     """
-    Lip-Sync Logic v1.2 - Forensic Precision.
+    Lip-Sync Logic v1.7 - Forensic Precision.
     - Articulatory Lag: Detects if mouth leads audio (Human) or follows (Deepfake).
-    - RMS Volume: Smoother amplitude tracking than onsets.
-    - Hierarchical Scoring: Lag anomalies trigger heavy deepfake penalties.
+    - Absolute Threshold: >= 0.1020 is Human | < 0.1020 is Deepfake.
     """
     frame_count = len(frames)
     if frame_count == 0 or audio_data is None:
         return 0.5, {}
 
     # Estimate FPS (heuristic if not provided)
-    fps = 30.0 # Standard fallback
+    if fps is None: fps = 30.0 # Standard fallback
     
     # 1. Visual Feature Extraction (Inner Lip ROI)
     mp_face_mesh = mp.solutions.face_mesh
@@ -121,26 +120,12 @@ def analyze(frames, audio_data, sr=22050, fps=30.0):
     global_peak_idx = np.argmax(correlation)
     global_lag_ms = ( (global_peak_idx - (len(aud_v) - 1)) / fps ) * 1000.0
 
-    # 4. Forensic Scoring v1.5 (Quick Calibration)
-    # User Rules: 0.1+ is Human | 0.03 or less is Deepfake
-    score = 0.5 
-    
-    # Primary Correlation Check
-    if max_corr >= 0.10:
-        score = 0.15 # Strong Human Match
-    elif max_corr <= 0.03:
-        score = 0.85 # Strong Deepfake Sign
+    # 4. Forensic Scoring v1.7 (Absolute Boundary Calibration)
+    # User Rule: >= 0.1020 is Human | < 0.1020 is Deepfake
+    if max_corr >= 0.1020:
+        score = 0.0 # High-confidence Human
     else:
-        # Borderline area (0.04 to 0.09) - interpolate or use secondary markers
-        score = 0.5
-        
-    # Secondary: Articulatory Lead Bonus (The "Human Lead" rule)
-    if -150 <= lag_ms <= -10 and max_corr > 0.05:
-        score -= 0.1 # Nudge towards human if natural lead exists
-        
-    # Secondary: Global Lag penalty (Only if sync is already weak)
-    if abs(global_lag_ms) > 400 and max_corr < 0.08:
-        score += 0.2 # Unnatural drift penalty
+        score = 1.0 # High-confidence Deepfake
 
     final_score = float(np.clip(score, 0.0, 1.0))
     tags = {
@@ -293,7 +278,7 @@ def run_file_upload(video_path=None):
         print(f"Error: {e}")
 
 if __name__ == "__main__":
-    print("Persona Lip-Sync Detector [v1.5]\n1. Upload | 2. Webcam")
+    print("Persona Lip-Sync Detector [v1.7]\n1. Upload | 2. Webcam")
     choice = input("Choice: ").strip()
     if choice == '1':
         run_file_upload()
