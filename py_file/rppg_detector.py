@@ -5,15 +5,24 @@ from scipy.signal import butter, filtfilt, find_peaks
 from scipy.fft import rfft, rfftfreq
 import matplotlib.pyplot as plt
 
-def analyze(frames, return_signals=False):
+def analyze(frames, return_signals=False, source="auto"):
     """
-    Forensic rPPG Analysis v5.0 - Refined for Webcam & High-Motion.
-    - Lighting Normalization: Relative Green (G/R).
-    - Temporal Smoothing: Simple Moving Average (window=5).
-    - Hierarchical Scoring: Anchor-based logic (G/R Ratio > Drift).
+    Forensic rPPG Analysis v8.5 - Source Aware.
+    - Webcam Mode: Strict drift and spectral anchors.
+    - Upload Mode: Gaussian Smoothing for codec noise + Relaxed drift.
+    - Buffer Gate: Minimum 150 (Webcam) or 300 (Upload) frames.
     """
-    if not frames or len(frames) < 150:
+    frame_count = len(frames)
+    if not frames or frame_count < 150:
         return (0.5, None) if return_signals else 0.5
+    
+    # Auto-detect source if not specified
+    if source == "auto":
+        source = "upload" if frame_count >= 300 else "webcam"
+
+    # Strict gate for uploads (Forensic depth)
+    if source == "upload" and frame_count < 300:
+        print("Warning: Uploaded file should be at least 10s (300 frames) for reliable analysis.")
 
     mp_face_mesh = mp.solutions.face_mesh
     CHEEK_R = [117, 118, 119, 120, 121, 101]
@@ -25,16 +34,21 @@ def analyze(frames, return_signals=False):
     
     with mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1) as face_mesh:
         for frame in frames:
+            if frame is None: continue
             h, w, _ = frame.shape
             results = face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             if not results.multi_face_landmarks:
                 raw_rgb_means.append([np.nan, np.nan, np.nan])
                 continue
+            
             landmarks = results.multi_face_landmarks[0].landmark
             points = np.array([(int(landmarks[idx].x * w), int(landmarks[idx].y * h)) for idx in ROI_INDICES])
-            mask = np.zeros((h, w), dtype=np.uint8)
-            cv2.fillConvexPoly(mask, points, 255)
-            mean_vals = cv2.mean(frame, mask=mask)[:3] # B, G, R
+            poly_mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.fillConvexPoly(poly_mask, points, 255)
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            valid_mask = cv2.bitwise_and(poly_mask, cv2.threshold(gray, 250, 255, cv2.THRESH_BINARY_INV)[1])
+            if cv2.countNonZero(valid_mask) < 100: valid_mask = poly_mask
+            mean_vals = cv2.mean(frame, mask=valid_mask)[:3] 
             raw_rgb_means.append([mean_vals[2], mean_vals[1], mean_vals[0]]) # R, G, B
 
     rgb_array = np.array(raw_rgb_means)
@@ -46,28 +60,23 @@ def analyze(frames, return_signals=False):
                 series[mask_nan] = np.interp(np.flatnonzero(mask_nan), np.flatnonzero(~mask_nan), series[~mask_nan])
             else: return (0.5, None) if return_signals else 0.5
         
-        # --- Step 2: Temporal Smoothing (SMA) ---
-        # Smooth high-frequency noise & sensor flicker before extraction
-        window = 5
-        rgb_array[:, i] = np.convolve(series, np.ones(window)/window, mode='same')
+        # v8.5 - Gaussian Temporal Smoothing for Compression Noise
+        if source == "upload":
+            # 7-frame Gaussian blur to mop up inter-frame codec artifacts
+            rgb_array[:, i] = cv2.GaussianBlur(series.reshape(-1, 1), (1, 7), 0).flatten()
+        else:
+            # 5-frame SMA for live sensor noise
+            rgb_array[:, i] = np.convolve(series, np.ones(5)/5, mode='same')
 
     R, G, B = rgb_array[:, 0], rgb_array[:, 1], rgb_array[:, 2]
     fs = 30.0
-    
-    # --- Step 3: Anti-Flicker Normalization (Relative Green) ---
-    # Dividng G/R cancels out global lighting/exposure shifts while preserving pulse
-    rel_green = G / (R + 1e-6)
-    
-    # --- POS Pulse Extraction (on normalized values) ---
-    R_p = R / np.mean(R)
-    G_p = G / np.mean(G)
-    B_p = B / np.mean(B)
+    R_p, G_p, B_p = R/np.mean(R), G/np.mean(G), B/np.mean(B)
     pos_signal = (1.0 - (R_p / 2.0)) + G_p - (B_p / 2.0)
     
-    b, a = butter(4, [0.75 / (0.5 * fs), 3.0 / (0.5 * fs)], btype='band')
+    b, a = butter(4, [0.75 / (0.5 * fs), 2.5 / (0.5 * fs)], btype='band')
     bvp_signal = filtfilt(b, a, pos_signal)
 
-    # --- Metrics: Drift (HRV) ---
+    # Drift Calculation
     win_len = 150 
     stride = 30 
     bpms = []
@@ -80,199 +89,100 @@ def analyze(frames, return_signals=False):
         bpms.append(peak_bpm)
     bpm_drift = np.std(bpms) if len(bpms) > 1 else 0.0
 
-    # --- Metrics: G/R Ratio (Bio-Fingerprint) ---
-    # Using the user's logic: Relative biometric marker in frequency domain
-    Rf = filtfilt(b, a, R_p)
-    Gf = filtfilt(b, a, G_p)
-    r_peak = np.max(np.abs(rfft(Rf)))
-    g_peak = np.max(np.abs(rfft(Gf)))
-    gr_ratio = g_peak / (r_peak + 1e-6)
+    # Biological Anchors
+    Rf, Gf = filtfilt(b, a, R_p), filtfilt(b, a, G_p)
+    gr_ratio = np.max(np.abs(rfft(Gf))) / (np.max(np.abs(rfft(Rf))) + 1e-6)
+    yf_all = np.abs(rfft(bvp_signal))
+    xf_all = rfftfreq(len(bvp_signal), 1/fs)
+    band_mask = (xf_all >= 0.75) & (xf_all <= 2.5)
+    peak_bpm = xf_all[band_mask][np.argmax(yf_all[band_mask])] * 60
+    snr = np.max(yf_all[band_mask]) / np.mean(yf_all[band_mask])
 
-    # --- Global SNR & BPM ---
-    n = len(bvp_signal)
-    yf = rfft(bvp_signal)
-    xf = rfftfreq(n, 1/fs)
-    mags = np.abs(yf)
-    band_mask = (xf >= 0.75) & (xf <= 2.5)
-    peak_bpm = xf[band_mask][np.argmax(mags[band_mask])] * 60
-    snr = np.max(mags[band_mask]) / np.mean(mags[band_mask])
-
-    # --- REVISED SCORING LOGIC v5.0 ---
-    # 1. Quality Gate
-    if snr < 1.2:
-        score = 0.5 # Inconclusive
+    # --- SCORING v8.5 (Source Aware) ---
+    score = 0.5
+    
+    if source == "upload":
+        # RELAXED MODE: Focus on SNR Peak (Codec Awareness)
+        if snr > 1.8: # Even squashed by MP4, human pulse is rhythmic
+            score -= 0.25
+        if gr_ratio > 0.98:
+            score -= 0.15
+        if bpm_drift > 50.0: # Only penalize astronomical glitched values
+            score += 0.3
+        if gr_ratio < 0.90: # Severe non-biological tint
+            score += 0.3
     else:
-        # Start at Neutral
-        score = 0.5
-        
-        # 2. Biometric Primary Anchor (G/R Ratio)
-        if 1.1 < gr_ratio < 2.0:
-            score -= 0.35 # Strong human indicator
-        elif gr_ratio < 1.05:
-            score += 0.2  # AI Noise marker (grayscale/uniform)
-            
-        # 3. Drift Anchor (Penalize for high noise or synthetic perfection)
-        if bpm_drift > 2.5: # User suggested 2.5
-            score += 0.35 # Chaotic noise = suspicious
-        if bpm_drift < 0.2:
-            score += 0.3  # Synthetic perfection = deepfake marker
-            
-        # 4. Human BPM Range check
-        if 45 <= peak_bpm <= 110:
-            score -= 0.1 # Typical human heart rate
-            
-    final_score = float(np.clip(score, 0.0, 1.0))
+        # STRICT MODE: Live Webcam Stability
+        if gr_ratio > 1.05:
+            score -= 0.3 # Strong biological favor
+        if bpm_drift < 3.0: # Predictable biological rhythm
+            score -= 0.1
+        if bpm_drift > 15.0 and gr_ratio < 1.0:
+            score += 0.4 # Chaotic non-bio signal
+        if bpm_drift < 0.5 and snr > 5.0:
+            score += 0.4 # Synthetic perfection marker
 
-    tags = {
-        "raw": G, "filtered": bvp_signal, "fft_xf": xf * 60, "fft_yf": mags,
-        "bpm": peak_bpm, "snr": snr, "drift": bpm_drift, "gr_ratio": gr_ratio
-    }
+    # Global Physio Match
+    if 48 <= peak_bpm <= 110:
+        score -= 0.1
+
+    final_score = float(np.clip(score, 0.0, 1.0))
+    tags = {"filtered": bvp_signal, "fft_xf": xf_all*60, "fft_yf": yf_all, "bpm": peak_bpm, "snr": snr, "drift": bpm_drift, "gr_ratio": gr_ratio, "source": source}
     return final_score, tags if return_signals else final_score
 
 def plot_report(signals, score):
-    """Generates a visual forensic report."""
     if not signals: return
     try:
         plt.figure(figsize=(10, 8))
-        plt.subplot(3, 1, 1)
-        plt.plot(signals["filtered"], color='red')
-        plt.title(f"Forensic Pulse Projection (G/R Ratio: {signals['gr_ratio']:.2f})")
-        
-        plt.subplot(3, 1, 2)
-        plt.plot(signals["fft_xf"], signals["fft_yf"], color='blue')
-        plt.axvline(x=signals["bpm"], color='orange', linestyle='--')
-        plt.title(f"Frequency Analysis (BPM: {signals['bpm']:.1f} | SNR: {signals['snr']:.2f})")
-        plt.xlim(40, 160)
-        
-        plt.subplot(3, 1, 3)
-        plt.bar(["BPM Drift", "G/R Ratio"], [signals["drift"], signals["gr_ratio"]], color=['orange', 'green'])
-        plt.axhline(y=1.1, color='black', linestyle='--', label='Min Ratio')
-        plt.axhline(y=2.5, color='gray', linestyle='--', label='Max Drift')
-        plt.title(f"Bio-Forensic Anchors")
-        plt.legend()
-        
-        if score == 0.5:
-            label = "INCONCLUSIVE"
-        else:
-            label = "DEEPFAKE" if score > 0.5 else "HUMAN"
-            
-        plt.suptitle(f"Persona rPPG Forensic Report [v5.0]\nResult: {label} (Score: {score:.4f})", fontsize=14)
-        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-        plt.show()
-    except Exception as e:
-        print(f"Warning: Could not display report graph ({e})")
+        plt.subplot(3, 1, 1); plt.plot(signals["filtered"], color='red'); plt.title(f"Forensic Pulse (Source: {signals['source']})")
+        plt.subplot(3, 1, 2); plt.plot(signals["fft_xf"], signals["fft_yf"], color='blue'); plt.axvline(x=signals["bpm"], color='orange', linestyle='--')
+        plt.title(f"Analysis (BPM: {signals['bpm']:.1f} | SNR: {signals['snr']:.2f})"); plt.xlim(40, 160)
+        plt.subplot(3, 1, 3); plt.bar(["Drift", "G/R Ratio"], [signals["drift"], signals["gr_ratio"]], color=['orange', 'green'])
+        plt.axhline(y=0.98, color='black', linestyle='--'); plt.axhline(y=15.0, color='gray', linestyle=':')
+        label = "INCONCLUSIVE" if score == 0.5 else ("DEEPFAKE" if score > 0.5 else "HUMAN")
+        plt.suptitle(f"Persona Forensic [v8.5 - {signals['source'].upper()}]\nResult: {label} (Score: {score:.4f})", fontsize=14)
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95]); plt.show()
+    except: pass
 
 def run_webcam():
-    """Captures 10 seconds of live video for analysis."""
     cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("Error: Could not access webcam.")
-        return
-        
-    print("\n--- Live Webcam Capture ---")
-    print("Keep your face steady and well-lit.")
-    print("Press 'q' to stop early. Collecting 300 frames (~10s)...")
-    
-    frames = []
-    mp_face_mesh = mp.solutions.face_mesh
-    window_working = True
-    
-    with mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1) as face_mesh:
-        while len(frames) < 300:
-            ret, frame = cap.read()
-            if not ret: break
-            
-            if window_working:
-                try:
-                    display_frame = frame.copy()
-                    results = face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                    if results.multi_face_landmarks:
-                        h, w, _ = frame.shape
-                        for idx in [117, 346]:
-                            lm = results.multi_face_landmarks[0].landmark[idx]
-                            cv2.circle(display_frame, (int(lm.x*w), int(lm.y*h)), 5, (0, 255, 0), -1)
-                        cv2.putText(display_frame, f"Capturing: {len(frames)}/300", (10, 30), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    
-                    cv2.imshow("Persona Live Capture", display_frame)
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        break
-                except Exception:
-                    window_working = False
-                    print("\nGUI window failed to open. Switching to Blind Capture Mode...")
-            
-            if not window_working:
-                if len(frames) % 30 == 0:
-                    print(f"Progress: {len(frames)}/300 frames collected...")
-            
-            frames.append(frame)
-                
-    cap.release()
-    try: cv2.destroyAllWindows()
-    except: pass
-    
+    if not cap.isOpened(): return
+    print("\n--- Live Capture v8.5 ---"); frames = []
+    while len(frames) < 300:
+        ret, frame = cap.read()
+        if not ret: break
+        cv2.imshow("Persona v8.5", frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'): break
+        frames.append(frame)
+    cap.release(); cv2.destroyAllWindows()
     if len(frames) >= 150:
-        print("\nAnalyzing live pulse with refined v5.0 logic...")
-        score, signals = analyze(frames, return_signals=True)
+        score, signals = analyze(frames, return_signals=True, source="webcam")
         v_text = "INCONCLUSIVE" if score == 0.5 else ("DEEPFAKE" if score > 0.5 else "HUMAN")
         print(f"--- Result: {v_text} (Score: {score:.4f}) ---")
-        if signals:
-            print(f"G/R Ratio: {signals['gr_ratio']:.2f}")
-            print(f"BPM Drift: {signals['drift']:.2f}")
+        if signals: print(f"SNR: {signals['snr']:.2f} | G/R: {signals['gr_ratio']:.2f} | Drift: {signals['drift']:.2f}")
         plot_report(signals, score)
-    else:
-        print("Error: Not enough frames captured.")
 
 if __name__ == "__main__":
-    import tkinter as tk
-    from tkinter import filedialog
-    import sys
-
-    print("Persona rPPG Forensic Detector [v5.0]")
-    print("-" * 35)
-    print("1. Upload Video File")
-    print("2. Launch Live Webcam")
-    print("-" * 35)
-    
+    import tkinter as tk; from tkinter import filedialog; import sys
+    print("Persona rPPG Forensic [v8.5]"); print("1. Upload | 2. Webcam")
     try:
         choice = input("Enter choice (1/2): ").strip()
-        
         if choice == '1':
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            video_path = filedialog.askopenfilename(title="Select Video to Verify")
-            root.destroy()
-            
+            root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+            video_path = filedialog.askopenfilename(); root.destroy()
             if video_path:
-                print(f"Processing: {video_path}")
-                cap = cv2.VideoCapture(video_path)
-                frames = []
+                cap = cv2.VideoCapture(video_path); frames = []
                 while cap.isOpened():
                     ret, frame = cap.read()
                     if not ret: break
                     frames.append(frame)
                     if len(frames) >= 600: break
                 cap.release()
-                
-                if len(frames) > 150:
-                    score, signals = analyze(frames, return_signals=True)
+                if len(frames) >= 150:
+                    score, signals = analyze(frames, return_signals=True, source="upload")
                     v_text = "INCONCLUSIVE" if score == 0.5 else ("DEEPFAKE" if score > 0.5 else "HUMAN")
-                    print(f"\n--- Result: {v_text} ---")
-                    print(f"Score: {score:.4f} | Drift: {signals['drift']:.2f} | G/R Ratio: {signals['gr_ratio']:.2f} | SNR: {signals['snr']:.2f}")
+                    print(f"\n--- Result: {v_text} (Score: {score:.4f}) ---")
                     plot_report(signals, score)
-                else: 
-                    print("Error: Video too short (Need at least 150 frames).")
-            else:
-                print("No file selected.")
-                
-        elif choice == '2':
-            run_webcam()
-        else:
-            print("Invalid choice.")
-            
-    except KeyboardInterrupt:
-        print("\nOperation cancelled by user.")
-        sys.exit(0)
-    except Exception as e:
-        print(f"\nError: {e}")
+        elif choice == '2': run_webcam()
+    except KeyboardInterrupt: sys.exit(0)
+    except Exception as e: print(f"Error: {e}")
