@@ -109,7 +109,7 @@ async def get_video_stream(video_path, decimate=False):
         
     cap.release()
 
-async def analyze_video_production(video_path):
+async def analyze_video_production(video_path, progress_callback=None, signal_callback=None):
     """Orchestrates the parallel forensic analysis."""
     
     # Pillar 4: Filename Sanitization
@@ -157,7 +157,7 @@ async def analyze_video_production(video_path):
             fps_full = len(frames) / duration
             fps_decimated = fps_full / 2.0
             
-            rppg_task = asyncio.to_thread(analyze_rppg, frames, return_signals=True, fps=fps_full, env_flags=env)
+            rppg_task = asyncio.to_thread(analyze_rppg, frames, return_signals=True, fps=fps_full, env_flags=env, callback=signal_callback)
             
             # Only run sync if there's audio energy (use decimated slice)
             if not is_silent:

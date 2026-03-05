@@ -14,7 +14,7 @@ def interpolate_peak(y, x, idx):
     p = 0.5 * (y0 - y2) / denom
     return x[idx] + p * (x[1] - x[0])
 
-def analyze(frames, return_signals=False, source="auto", fps=30.0, env_flags=None):
+def analyze(frames, return_signals=False, source="auto", fps=30.0, env_flags=None, callback=None):
     """
     Forensic rPPG Analysis v14.7 - Shaky Cam Hardening.
     - Environmental Calibration: Aggressive relaxation for extreme handheld motion.
@@ -138,6 +138,9 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0, env_flags=Non
         
         f_phase = np.angle(f_fft[peak_w_abs])
         c_phase = np.angle(c_fft[peak_w_abs])
+        # Stream BVP update for real-time visualization if callback provided
+        if callback:
+            callback(float(master_bvp[min(i+win_len-1, len(master_bvp)-1)]))
         phase_lags.append(np.abs(f_phase - c_phase))
     
     phase_jitter = np.std(phase_lags) if len(phase_lags) > 1 else 0.0
