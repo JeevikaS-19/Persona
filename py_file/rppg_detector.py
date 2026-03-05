@@ -51,11 +51,13 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0, env_flags=Non
     
     roi_means = {name: [] for name in ROIS}
     
-    # v16.0 - Context-Aware Pre-Analysis
+    # v18.0 - Headless Optimized Extraction (Stride=3)
     bg_means = []
+    stride_extraction = 3
     
     with mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1) as face_mesh:
-        for frame in frames:
+        for i in range(0, frame_count, stride_extraction):
+            frame = frames[i]
             if frame is None: continue
             h, w, _ = frame.shape
             
@@ -138,9 +140,7 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0, env_flags=Non
         
         f_phase = np.angle(f_fft[peak_w_abs])
         c_phase = np.angle(c_fft[peak_w_abs])
-        # Stream BVP update for real-time visualization if callback provided
-        if callback:
-            callback(float(master_bvp[min(i+win_len-1, len(master_bvp)-1)]))
+        # Stream BVP update removed to prioritize single-result JSON
         phase_lags.append(np.abs(f_phase - c_phase))
     
     phase_jitter = np.std(phase_lags) if len(phase_lags) > 1 else 0.0
@@ -379,7 +379,8 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0, env_flags=Non
 
     final_score = float(np.clip(score, 0.0, 1.0))
     tags = {
-        "filtered": master_bvp, "xf": xf*60, "yf": yf, "bpm": peak_bpm, 
+        "filtered": master_bvp.tolist() if isinstance(master_bvp, np.ndarray) else master_bvp, 
+        "xf": (xf*60).tolist(), "yf": yf.tolist(), "bpm": peak_bpm, 
         "snr": snr, "drift": bpm_drift, "gr_var": avg_gr_var, 
         "gr_lock": gr_lockstep, "gr_lag": gr_phase_lag, 
         "entropy": spectral_entropy, "roi_var": roi_variance, "fps": fs,
@@ -417,14 +418,15 @@ def run_webcam():
         if cv2.waitKey(1) & 0xFF == ord('q'): break
         frames.append(frame)
     duration = time.time() - start_time
-    cap.release(); cv2.destroyAllWindows()
+    # cap.release(); cv2.destroyAllWindows() # GUI cleanup removed for headless
+    cap.release()
     if len(frames) >= 75:
         actual_fps = len(frames) / duration if duration > 0 else 30.0
         print(f"[*] Analyzing {len(frames)} frames (@{actual_fps:.1f} FPS)...")
         score, sigs = analyze(frames, return_signals=True, source="webcam", fps=actual_fps)
         label = "DEEPFAKE" if score > 0.5 else "HUMAN"
         print(f"--- Result: {label} (Score: {score:.4f}) ---")
-        plot_report(sigs, score)
+        # plot_report(sigs, score) # Headless mode
 
 if __name__ == "__main__":
     import time

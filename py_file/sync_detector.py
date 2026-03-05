@@ -32,47 +32,46 @@ def analyze(frames, audio_data, sr=22050, fps=30.0):
     # Estimate FPS (heuristic if not provided)
     if fps is None: fps = 30.0 # Standard fallback
     
-    # 1. Visual Feature Extraction (Inner Lip ROI)
+    # 1. Visual Feature Extraction (Headless Stride=3)
     mp_face_mesh = mp.solutions.face_mesh
-    face_mesh = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1)
+    stride_extraction = 3
     
     v_distances = [] 
     h_distances = [] 
     
-    for frame in frames:
-        results = face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        if results.multi_face_landmarks:
-            l = results.multi_face_landmarks[0].landmark
-            # INNER Lip landmarks (13, 14 vertical | 78, 308 horizontal)
-            v_dist = np.sqrt((l[13].x - l[14].x)**2 + (l[13].y - l[14].y)**2)
-            h_dist = np.sqrt((l[78].x - l[308].x)**2 + (l[78].y - l[308].y)**2)
-            scale = np.sqrt((l[10].x - l[152].x)**2 + (l[10].y - l[152].y)**2)
-            v_distances.append(v_dist / (scale + 1e-6))
-            h_distances.append(h_dist / (scale + 1e-6))
-        else:
-            v_distances.append(v_distances[-1] if v_distances else 0.0)
-            h_distances.append(h_distances[-1] if h_distances else 0.0)
+    with mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1) as face_mesh:
+        for i in range(0, frame_count, stride_extraction):
+            frame = frames[i]
+            results = face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            if results.multi_face_landmarks:
+                l = results.multi_face_landmarks[0].landmark
+                v_dist = np.sqrt((l[13].x - l[14].x)**2 + (l[13].y - l[14].y)**2)
+                h_dist = np.sqrt((l[78].x - l[308].x)**2 + (l[78].y - l[308].y)**2)
+                scale = np.sqrt((l[10].x - l[152].x)**2 + (l[10].y - l[152].y)**2)
+                v_distances.append(v_dist / (scale + 1e-6))
+                h_distances.append(h_dist / (scale + 1e-6))
+            else:
+                v_distances.append(v_distances[-1] if v_distances else 0.0)
+                h_distances.append(h_distances[-1] if h_distances else 0.0)
 
     # 2. Audio Feature Extraction (RMS + Pitch)
-    # RMS is more stable for articulation than onset strength
-    hop = len(audio_data) // frame_count
+    # Re-normalize audio to match decimated visual stream
+    vis_count = len(v_distances)
+    hop = len(audio_data) // vis_count
     audio_rms = librosa.feature.rms(y=audio_data, hop_length=hop)[0]
-    audio_rms = audio_rms[:frame_count]
+    audio_rms = audio_rms[:vis_count]
     
     pitches, magnitudes = librosa.piptrack(y=audio_data, sr=sr, hop_length=hop)
     pitch_series = []
-    for t in range(min(frame_count, pitches.shape[1])):
+    for t in range(min(vis_count, pitches.shape[1])):
         idx = magnitudes[:, t].argmax()
         pitch_series.append(pitches[idx, t])
     pitch_series = np.array(pitch_series)
-    if len(pitch_series) < frame_count:
-        pitch_series = np.pad(pitch_series, (0, frame_count - len(pitch_series)), 'edge')
+    if len(pitch_series) < vis_count:
+        pitch_series = np.pad(pitch_series, (0, vis_count - len(pitch_series)), 'edge')
 
     # Vocal Gating (Focus on active speech)
-    # This prevents silence from diluting the correlation score.
-    vocal_gate = audio_rms > (np.max(audio_rms) * 0.1) # 10% of peak energy
-    v_distances_vocal = np.array(v_distances)[vocal_gate]
-    audio_rms_vocal = audio_rms[vocal_gate]
+    vocal_gate = audio_rms > (np.max(audio_rms) * 0.1)
     
     # 3. Cross-Correlation & Lag Analysis
     def norm(sig):
@@ -82,13 +81,10 @@ def analyze(frames, audio_data, sr=22050, fps=30.0):
     vis_v = norm(np.array(v_distances))
     aud_v = norm(audio_rms)
     
-    # Forensic Temporal Offset Search (Strict +/- 150ms window)
-    # This allows for natural transport lag (mic/compression) while catching AI drifts.
     correlation = np.correlate(vis_v, aud_v, mode='full')
     lags = np.arange(-(len(aud_v)-1), len(vis_v))
     
-    # Window: 150ms in frames
-    window_frames = int(0.150 * fps)
+    window_frames = int(0.150 * (fps/stride_extraction))
     valid_mask = (lags >= -window_frames) & (lags <= window_frames)
     
     if np.any(valid_mask):
@@ -97,45 +93,33 @@ def analyze(frames, audio_data, sr=22050, fps=30.0):
         peak_idx = np.argmax(valid_corr)
         peak_shift = valid_lags[peak_idx]
         
-        # Recalculate correlation quality on VOCAL SEGMENTS ONLY
-        if len(v_distances_vocal) > 10:
-            # Shift the visual signal by peak_shift for quality check
+        if len(vis_v[vocal_gate]) > 5:
             shifted_vis = np.roll(vis_v, -peak_shift)
             max_corr = np.corrcoef(shifted_vis[vocal_gate], aud_v[vocal_gate])[0,1]
         else:
-            max_corr = valid_corr[peak_idx] / (frame_count + 1e-6)
+            max_corr = valid_corr[peak_idx] / (vis_count + 1e-6)
     else:
         peak_shift = 0
         max_corr = 0.0
 
-    lag_ms = (peak_shift / fps) * 1000.0
+    lag_ms = (peak_shift / (fps/stride_extraction)) * 1000.0
     
-    # Pitch vs Stretch correlation
     if len(h_distances) == len(pitch_series):
         corr_h = np.corrcoef(norm(h_distances), norm(pitch_series))[0,1]
     else:
         corr_h = 0.0
 
-    # Global peak for diagnostic (to see if it's way out of sync)
-    global_peak_idx = np.argmax(correlation)
-    global_lag_ms = ( (global_peak_idx - (len(aud_v) - 1)) / fps ) * 1000.0
-
-    # 4. Forensic Scoring v1.7 (Absolute Boundary Calibration)
-    # User Rule: >= 0.1020 is Human | < 0.1020 is Deepfake
-    if max_corr >= 0.1020:
-        score = 0.0 # High-confidence Human
-    else:
-        score = 1.0 # High-confidence Deepfake
+    # 4. Forensic Scoring v1.7
+    score = 0.0 if max_corr >= 0.1020 else 1.0
 
     final_score = float(np.clip(score, 0.0, 1.0))
     tags = {
         "score": final_score,
-        "v_dist": v_distances,
-        "audio_amp": audio_rms,
-        "lag_ms": lag_ms,
-        "global_lag_ms": global_lag_ms,
-        "max_corr": max_corr,
-        "pitch_corr": corr_h if 'corr_h' in locals() else 0.0
+        "v_dist": np.array(v_distances).tolist(),
+        "audio_amp": audio_rms.tolist(),
+        "lag_ms": float(lag_ms),
+        "max_corr": float(max_corr),
+        "pitch_corr": float(corr_h) if 'corr_h' in locals() else 0.0
     }
     return final_score, tags
 
@@ -176,7 +160,8 @@ def run_webcam():
             elapsed = (cv2.getTickCount() - start_time) / cv2.getTickFrequency()
             cv2.putText(frame, f"RECORDING: {duration - elapsed:.1f}s", (20, 40), 
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-            cv2.imshow("LipSync Live v1.1", frame)
+            # cv2.imshow("LipSync Live v1.1", frame) # Headless
+
             frames.append(frame)
             
             if cv2.waitKey(1) & 0xFF == ord('q'): break
@@ -217,7 +202,8 @@ def run_webcam():
     plt.legend()
     plt.suptitle(f"Final Score: {score:.4f} - {'DEEPFAKE' if score > 0.5 else 'HUMAN'}")
     plt.tight_layout()
-    plt.show()
+    # plt.show() # Headless
+
 
 def run_file_upload(video_path=None):
     if not video_path:
