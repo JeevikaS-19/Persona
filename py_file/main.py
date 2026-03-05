@@ -12,6 +12,7 @@ from pathlib import Path
 from rppg_detector import analyze as analyze_rppg
 from sync_detector import analyze as analyze_sync
 from biometric_detector import analyze as analyze_biometric
+from reflection_detector import analyze as analyze_reflection
 from moviepy.video.io.VideoFileClip import VideoFileClip
 import mediapipe as mp
 
@@ -223,6 +224,15 @@ async def analyze_video_production(video_path, progress_callback=None, signal_ca
                 logger.error(f"Biometric Specialist Failure: {e}")
                 biometric_tags = {"error": str(e)}
 
+            # Specialist D: Reflection
+            reflection_score, reflection_tags = 0.5, {}
+            try:
+                reflection_data = await asyncio.to_thread(analyze_reflection, frames, fps=fs, return_signals=True)
+                reflection_score, reflection_tags = reflection_data if isinstance(reflection_data, tuple) else (reflection_data, {})
+            except Exception as e:
+                logger.error(f"Reflection Specialist Failure: {e}")
+                reflection_tags = {"error": str(e)}
+
             # Specialist C: Keyframe Spatial Artifacts (Optimization Directive)
             try:
                 import random
@@ -239,7 +249,8 @@ async def analyze_video_production(video_path, progress_callback=None, signal_ca
                 logger.error(f"Spatial Specialist Failure: {e}")
 
             # Final Summary (Ensemble weighted)
-            ensemble_score = (rppg_score * 0.3) + (sync_score * 0.3) + (biometric_score * 0.3) + (spatial_score * 0.1)
+            # Weights: rPPG(0.3), Sync(0.2), Biometric(0.3), Reflection(0.1), Spatial(0.1)
+            ensemble_score = (rppg_score * 0.3) + (sync_score * 0.2) + (biometric_score * 0.3) + (reflection_score * 0.1) + (spatial_score * 0.1)
             classification = "DEEPFAKE" if ensemble_score > 0.5 else "HUMAN"
             
             return {
@@ -250,6 +261,7 @@ async def analyze_video_production(video_path, progress_callback=None, signal_ca
                     "rppg_score": round(float(rppg_score), 4),
                     "sync_score": round(float(sync_score), 4),
                     "biometric_score": round(float(biometric_score), 4),
+                    "reflection_score": round(float(reflection_score), 4),
                     "spatial_score": round(float(spatial_score), 4),
                     "classification": classification
                 },

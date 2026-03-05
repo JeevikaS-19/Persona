@@ -157,6 +157,7 @@ export default function App() {
               ensemble_score: data.score,
               sync_score: data.sync_score,
               biometric_score: data.biometric_score,
+              reflection_score: data.reflection_score,
               rppg_score: data.score * 0.9 // Heuristic for rPPG component
             },
             forensics: {
@@ -220,6 +221,7 @@ export default function App() {
             ensemble_score: data.score,
             sync_score: data.sync_score,
             biometric_score: data.biometric_score,
+            reflection_score: data.reflection_score,
             rppg_score: data.score * 0.9
           },
           forensics: {
