@@ -11,6 +11,7 @@ from pathlib import Path
 # Import our forensic specialists
 from rppg_detector import analyze as analyze_rppg
 from sync_detector import analyze as analyze_sync
+from biometric_detector import analyze as analyze_biometric
 from moviepy.video.io.VideoFileClip import VideoFileClip
 import mediapipe as mp
 
@@ -213,6 +214,15 @@ async def analyze_video_production(video_path, progress_callback=None, signal_ca
                 logger.error(f"Sync Specialist Failure: {e}")
                 sync_tags = {"error": str(e)}
 
+            # Specialist C: Biometric (Saccade)
+            biometric_score, biometric_tags = 0.5, {}
+            try:
+                biometric_data = await asyncio.to_thread(analyze_biometric, frames, fps=fs, return_signals=True)
+                biometric_score, biometric_tags = biometric_data if isinstance(biometric_data, tuple) else (biometric_data, {})
+            except Exception as e:
+                logger.error(f"Biometric Specialist Failure: {e}")
+                biometric_tags = {"error": str(e)}
+
             # Specialist C: Keyframe Spatial Artifacts (Optimization Directive)
             try:
                 import random
@@ -229,7 +239,7 @@ async def analyze_video_production(video_path, progress_callback=None, signal_ca
                 logger.error(f"Spatial Specialist Failure: {e}")
 
             # Final Summary (Ensemble weighted)
-            ensemble_score = (rppg_score * 0.4) + (sync_score * 0.4) + (spatial_score * 0.2)
+            ensemble_score = (rppg_score * 0.3) + (sync_score * 0.3) + (biometric_score * 0.3) + (spatial_score * 0.1)
             classification = "DEEPFAKE" if ensemble_score > 0.5 else "HUMAN"
             
             return {
@@ -239,6 +249,7 @@ async def analyze_video_production(video_path, progress_callback=None, signal_ca
                     "ensemble_score": round(float(ensemble_score), 4),
                     "rppg_score": round(float(rppg_score), 4),
                     "sync_score": round(float(sync_score), 4),
+                    "biometric_score": round(float(biometric_score), 4),
                     "spatial_score": round(float(spatial_score), 4),
                     "classification": classification
                 },
@@ -248,8 +259,10 @@ async def analyze_video_production(video_path, progress_callback=None, signal_ca
                     "filtered": rppg_tags.get("filtered", []),
                     "audio_amp": sync_tags.get("audio_amp", []),
                     "v_dist": sync_tags.get("v_dist", []),
+                    "jitter": biometric_tags.get("jitter_avg", 0),
                     "rppg_fault": "error" in rppg_tags,
-                    "sync_fault": "error" in sync_tags
+                    "sync_fault": "error" in sync_tags,
+                    "biometric_fault": "error" in biometric_tags
                 },
                 "telemetry": {
                     "compute_time": round(time.time() - start_time, 2),

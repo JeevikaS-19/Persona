@@ -156,7 +156,8 @@ export default function App() {
               classification: data.verdict,
               ensemble_score: data.score,
               sync_score: data.sync_score,
-              rppg_score: data.score * 0.9 // Heuristic for rPPG component if missing
+              biometric_score: data.biometric_score,
+              rppg_score: data.score * 0.9 // Heuristic for rPPG component
             },
             forensics: {
               filtered: data.rppg_graph,
@@ -218,6 +219,7 @@ export default function App() {
             classification: data.verdict,
             ensemble_score: data.score,
             sync_score: data.sync_score,
+            biometric_score: data.biometric_score,
             rppg_score: data.score * 0.9
           },
           forensics: {

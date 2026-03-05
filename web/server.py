@@ -83,7 +83,8 @@ def analyze_bridge():
                     "verdict": m.get("classification"),
                     "score": m.get("ensemble_score"),
                     "rppg_graph": f.get("filtered", []),
-                    "sync_score": m.get("sync_score")
+                    "sync_score": m.get("sync_score"),
+                    "biometric_score": m.get("biometric_score")
                 }
                 return jsonify(bridge_response)
             else:
