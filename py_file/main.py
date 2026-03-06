@@ -15,6 +15,7 @@ from biometric_detector import analyze as analyze_biometric
 from reflection_detector import analyze as analyze_reflection
 from moviepy.video.io.VideoFileClip import VideoFileClip
 import mediapipe as mp
+import pandas as pd
 
 class EnvironmentalAnalyzer:
     """Detects organic chaos: Motion, ISO Grain, and Luminance."""
@@ -292,6 +293,97 @@ async def analyze_video_production(video_path, progress_callback=None, signal_ca
             try: os.unlink(temp_trim_path)
             except: pass
 
-# Headless entry point
+async def run_cli_audit(source_type="webcam", file_path=None):
+    """CLI entry point for a full Persona forensic audit."""
+    print(f"\n--- Persona Sentinel Audit v2.5 [{source_type.upper()}] ---")
+    
+    frames = []
+    fps = 30.0
+    
+    if source_type == "webcam":
+        cap = cv2.VideoCapture(0)
+        print("[*] Monitoring Webcam... (Press 'Q' to analyze)")
+        while True:
+            ret, frame = cap.read()
+            if not ret: break
+            cv2.putText(frame, "PERSONA AUDIT ACTIVE", (20, 40), 1, 1, (0, 0, 255), 2)
+            cv2.imshow("Persona Engine CLI", frame)
+            frames.append(frame)
+            if cv2.waitKey(1) & 0xFF == ord('q') or len(frames) >= 300: break
+        cap.release()
+        cv2.destroyAllWindows()
+    else:
+        if not file_path or not os.path.exists(file_path):
+            print("[!] Invalid File Path."); return
+        cap = cv2.VideoCapture(file_path)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        print(f"[*] Ingesting: {os.path.basename(file_path)} (@{fps:.1f} FPS)")
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret: break
+            frames.append(frame)
+            if len(frames) >= 600: break
+        cap.release()
+
+    if len(frames) < 75:
+        print("[!] Data stream too short for specialized forensic analysis.")
+        return
+
+    print("[*] Running Ensemble Specialists (rPPG, Sync, Bio, Physics)...")
+    # For CLI, we save as a temp file to allow Specialists to use their native file loaders (like librosa for Sync)
+    temp_path = "cli_audit_temp.mp4"
+    try:
+        # Create a basic video for specialists that need file access
+        h, w = frames[0].shape[:2]
+        out = cv2.VideoWriter(temp_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+        for f in frames: out.write(f)
+        out.release()
+        
+        result = await analyze_video_production(temp_path)
+        
+        if result["status"] == "completed":
+            m = result["metrics"]
+            print("\n" + "="*40)
+            print(f"FINAL CONSENSUS: {m['classification']}")
+            print(f"Overall Suspicion Score: {m['ensemble_score']:.4f}")
+            print("-" * 40)
+            print(f"-> Heart Rate Consistency: {m['rppg_score']:.4f}")
+            print(f"-> Lip-Sync Correlation:  {m['sync_score']:.4f}")
+            print(f"-> Biometric Eye-Jitter:  {m['biometric_score']:.4f}")
+            print(f"-> Corneal Physics:       {m['reflection_score']:.4f}")
+            print("="*40 + "\n")
+
+            # Option to save report to Pendrive
+            save_choice = input("Save Forensic Report? (y/n): ").strip().lower()
+            if save_choice == 'y':
+                import tkinter as tk
+                from tkinter import filedialog
+                root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+                save_path = filedialog.asksaveasfilename(
+                    defaultextension=".csv",
+                    filetypes=[("CSV files", "*.csv")],
+                    title="Export Forensic Audit to Pendrive",
+                    initialfile=f"persona_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                )
+                root.destroy()
+                if save_path:
+                    # Flatten metrics and environment for a flat CSV report
+                    report_data = {**m, **result.get("environment", {})}
+                    pd.DataFrame([report_data]).to_csv(save_path, index=False)
+                    print(f"[+] Report exported to: {save_path}")
+        else:
+            print(f"[!] Engine Error: {result.get('message')}")
+            
+    finally:
+        if os.path.exists(temp_path): os.remove(temp_path)
+
 if __name__ == "__main__":
-    print("PERSONA ENGINE: Headless Mode Active")
+    print("Persona Forensic Engine [v2.5]\n1. Upload | 2. Webcam")
+    choice = input("Select: ").strip()
+    if choice == '1':
+        import tkinter as tk; from tkinter import filedialog
+        root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+        path = filedialog.askopenfilename(); root.destroy()
+        if path: asyncio.run(run_cli_audit("upload", path))
+    elif choice == '2':
+        asyncio.run(run_cli_audit("webcam"))
