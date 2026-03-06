@@ -3,6 +3,7 @@ import mediapipe as mp
 import numpy as np
 import os
 import time
+import matplotlib.pyplot as plt
 from collections import deque
 
 # --- BIOMETRIC PRECISION SETTINGS ---
@@ -71,6 +72,25 @@ def analyze(frames, fps=30.0, return_signals=False):
     }
     
     return (final_score, tags) if return_signals else final_score
+
+def plot_report(tags, score):
+    """Generates a forensic biometric jitter report."""
+    try:
+        plt.figure(figsize=(10, 5))
+        plt.plot(tags.get('history', []), color='orange', linewidth=2, label='Micro-Jitter')
+        plt.axhline(y=0.12, color='red', linestyle='--', label='Sensitivity Threshold')
+        plt.title(f"Biometric Eye Jitter v2.0 | Avg: {tags.get('jitter_avg', 0):.4f}")
+        plt.xlabel("Frame Index")
+        plt.ylabel("Jitter Intensity")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        
+        label = 'DEEPFAKE' if score > 0.5 else 'HUMAN'
+        plt.suptitle(f"Final Score: {score:.4f} - {label}", fontsize=14)
+        plt.tight_layout()
+        plt.show()
+    except Exception as e:
+        print(f"Plotting failed: {e}")
 
 def run_webcam():
     cap = cv2.VideoCapture(0)

@@ -206,7 +206,7 @@ export default function App() {
     const reader = new FileReader();
     reader.onload = async () => {
       try {
-        const res = await fetch('http://localhost:5011/analyze', {
+        const res = await fetch('http://127.0.0.1:5011/analyze', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ buffer: reader.result as string })
@@ -425,21 +425,34 @@ export default function App() {
                   <div className="bg-black/30 border border-white/5 rounded-2xl p-6 flex flex-col">
                     <div className="flex items-center justify-between mb-4">
                       <span className="text-[10px] font-bold text-zinc-500 tracking-widest flex items-center gap-2 uppercase">
-                        <BarChart3 className="h-3 w-3 text-blue-500" /> Behavioral_Sync
+                        <BarChart3 className="h-3 w-3 text-blue-500" /> Specialist_Consensus
                       </span>
-                      <span className="text-[10px] font-mono text-zinc-400">Corr: {report.metrics.sync_score.toFixed(3)}</span>
+                      <span className="text-[10px] font-mono text-zinc-400">Total Audit Components: 4</span>
                     </div>
                     <div className="flex-1 min-h-0">
                       <Bar
                         data={{
-                          labels: ['rPPG', 'Sync'],
+                          labels: ['Heart', 'Lip', 'Eye-J', 'Eye-R'],
                           datasets: [{
-                            data: [report.metrics.rppg_score, report.metrics.sync_score],
-                            backgroundColor: ['#ef4444', '#3b82f6'],
+                            data: [
+                              report.metrics.rppg_score,
+                              report.metrics.sync_score,
+                              report.metrics.biometric_score,
+                              report.metrics.reflection_score
+                            ],
+                            backgroundColor: ['#ef4444', '#3b82f6', '#f59e0b', '#06b6d4'],
                             borderRadius: 4
                           }]
                         }}
-                        options={{ responsive: true, maintainAspectRatio: false, scales: { x: { display: false }, y: { display: false } }, plugins: { legend: { display: false } } }}
+                        options={{
+                          responsive: true,
+                          maintainAspectRatio: false,
+                          scales: {
+                            x: { display: true, ticks: { color: '#71717a', font: { size: 8 } } },
+                            y: { display: false, min: 0, max: 1 }
+                          },
+                          plugins: { legend: { display: false } }
+                        }}
                       />
                     </div>
                   </div>

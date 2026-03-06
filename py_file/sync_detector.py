@@ -123,6 +123,28 @@ def analyze(frames, audio_data, sr=22050, fps=30.0):
     }
     return final_score, tags
 
+def plot_report(tags, score):
+    """Generates a forensic lip-sync report."""
+    try:
+        plt.figure(figsize=(10, 7))
+        plt.subplot(2,1,1)
+        plt.plot(tags['v_dist'], label='Inner Mouth Opening', color='blue', linewidth=2)
+        plt.title(f"Forensic Lip-Sync v1.7 | Lag: {tags['lag_ms']:.2f}ms")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        
+        plt.subplot(2,1,2)
+        plt.plot(tags['audio_amp'], label='Audio RMS Energy', color='red', linewidth=2)
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        
+        label = 'DEEPFAKE' if score > 0.5 else 'HUMAN'
+        plt.suptitle(f"Final Score: {score:.4f} - {label}", fontsize=14)
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        plt.show()
+    except Exception as e:
+        print(f"Plotting failed: {e}")
+
 def run_webcam():
     import sounddevice as sd
     import wavio
@@ -244,21 +266,8 @@ def run_file_upload(video_path=None):
         print("-" * 30)
         print(f"RESULT: {'DEEPFAKE' if score > 0.5 else 'HUMAN'}")
         print(f"Sync Score: {score:.4f} (Correlation: {tags['max_corr']:.4f})")
-        print(f"Articulation Lag: {tags['lag_ms']:.2f}ms ({'Human Lead' if tags['lag_ms'] < 0 else 'AI Delay'})")
         print("-" * 30)
-        
-        # Plotting
-        plt.figure(figsize=(10, 7))
-        plt.subplot(2,1,1)
-        plt.plot(tags['v_dist'], label='Inner Mouth Opening', color='blue')
-        plt.title(f"Forensic Lip-Sync v1.2 | Lag: {tags['lag_ms']:.2f}ms")
-        plt.legend()
-        plt.subplot(2,1,2)
-        plt.plot(tags['audio_amp'], label='Audio RMS Energy', color='red')
-        plt.legend()
-        plt.suptitle(f"Final Score: {score:.4f} - {'DEEPFAKE' if score > 0.5 else 'HUMAN'}")
-        plt.tight_layout()
-        plt.show()
+        plot_report(tags, score)
 
     except Exception as e:
         print(f"Error: {e}")
