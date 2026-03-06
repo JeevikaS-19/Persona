@@ -253,17 +253,23 @@ async def analyze_video_production(video_path, source_type="upload", progress_ca
                 logger.error(f"Reflection Specialist Failure: {e}")
                 reflection_tags = {"error": str(e)}
 
-            # Explicitly invert scores to be Authenticity Metrics (1.0 = Human, 0.0 = Deepfake)
-            rppg_score = 1.0 - rppg_score
-            sync_score = 1.0 - sync_score
-            biometric_score = 1.0 - biometric_score
-            reflection_score = 1.0 - reflection_score
+            # All specialists now return 0=human, 1=deepfake (suspicion scale)
+            # Dynamic ensemble: skip specialists stuck at 0.5 (faulted/no data)
+            # so they don't dilute the result with a meaningless neutral vote.
+            candidates = [
+                (rppg_score,       0.35, "error" not in rppg_tags),
+                (sync_score,       0.25, "error" not in sync_tags),
+                (biometric_score,  0.30, "error" not in biometric_tags),
+                (reflection_score, 0.10, "error" not in reflection_tags),
+            ]
+            active = [(s, w) for s, w, ok in candidates if ok and s != 0.5]
+            if not active:
+                active = [(s, w) for s, w, _ in candidates]  # fallback: use all
+            total_weight = sum(w for _, w in active)
+            ensemble_score = sum(s * w for s, w in active) / total_weight
             
-            # Final Ensemble: rPPG(0.35) Sync(0.25) Bio(0.30) Refl(0.10)
-            ensemble_score = (rppg_score * 0.35) + (sync_score * 0.25) + (biometric_score * 0.30) + (reflection_score * 0.10)
-            
-            # Threshold: <= 0.35 Authenticity = Deepfake
-            classification = "DEEPFAKE" if ensemble_score <= 0.35 else "HUMAN"
+            # Suspicion threshold: >= 0.65 → DEEPFAKE
+            classification = "DEEPFAKE" if ensemble_score >= 0.65 else "HUMAN"
             
             return {
                 "status": "completed",
@@ -387,7 +393,7 @@ async def run_cli_audit(source_type="webcam", file_path=None):
             ]
             for name, s in specialists:
                 mini_bar = "█" * int(s * 20) + "░" * (20 - int(s * 20))
-                flag_sp  = " ⚠" if s <= 0.35 else "  "
+                flag_sp  = " ⚠" if s >= 0.65 else "  "
                 print(f"║  {name:<22} [{mini_bar}] {s:.4f}{flag_sp}  ║")
 
             # Environment

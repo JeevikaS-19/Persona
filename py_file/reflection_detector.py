@@ -227,13 +227,13 @@ def analyze(frames, fps=30.0, return_signals=False):
     if baked_blink_failures > 2: # Even 2 frames of light escaping a closed eyelid is physically impossible
         humanity = 0.0
 
-    final_score = float(np.clip(humanity, 0.0, 1.0))
+    final_score = float(np.clip(1.0 - humanity, 0.0, 1.0))  # 0=human, 1=deepfake
     tags = {
         "score": final_score,
         "morphology_r2": morph_avg,
         "parallax_fails": parallax_failures,
         "blink_persistence": baked_blink_failures,
-        "verdict": "HUMAN" if final_score > 0.65 else "DEEPFAKE"
+        "verdict": "DEEPFAKE" if final_score >= 0.5 else "HUMAN"
     }
     
     return (final_score, tags) if return_signals else final_score
@@ -243,15 +243,15 @@ import matplotlib.pyplot as plt
 def plot_report(tags, score):
     """Display a graphical forensic report for the Optical Physics Engine."""
     try:
-        label = 'HUMAN' if score > 0.65 else 'DEEPFAKE'
-        color = 'green' if label == 'HUMAN' else 'red'
+        label = 'DEEPFAKE' if score >= 0.5 else 'HUMAN'  # 0=human, 1=deepfake
+        color = 'red' if label == 'DEEPFAKE' else 'green'
         
         fig, axes = plt.subplots(1, 2, figsize=(12, 5))
         fig.patch.set_facecolor('#1c1c1c')
         for ax in axes:
             ax.set_facecolor('#2a2a2a')
         
-        # Left plot: Pillar Scores
+        # Left plot: Pillar Scores (show authenticity for readability, invert for display)
         pillars = ['Morphology\n(Gaussian R²)', 'Parallax\nProof', 'Blink\nIntegrity']
         parallax_score = 1.0 if tags.get('parallax_fails', 0) == 0 else max(0, 1 - tags['parallax_fails'] / 10)
         blink_score = 1.0 if tags.get('blink_persistence', 0) == 0 else 0.0
@@ -259,23 +259,23 @@ def plot_report(tags, score):
         bar_colors = ['green' if v > 0.5 else 'red' for v in values]
         bars = axes[0].bar(pillars, values, color=bar_colors, edgecolor='white', linewidth=0.5)
         axes[0].set_ylim(0, 1.2)
-        axes[0].set_ylabel('Score', color='white')
+        axes[0].set_ylabel('Physics Score (1=pass)', color='white')
         axes[0].set_title('Physics Pillar Breakdown', color='white', fontsize=12, fontweight='bold')
         axes[0].tick_params(colors='white')
-        axes[0].axhline(y=0.65, color='yellow', linestyle='--', linewidth=1, label='Human Threshold')
+        axes[0].axhline(y=0.5, color='yellow', linestyle='--', linewidth=1, label='Pass Threshold')
         for bar, val in zip(bars, values):
             axes[0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
                          f'{val:.2f}', ha='center', va='bottom', color='white', fontsize=10)
         axes[0].legend(facecolor='#333')
         
-        # Right plot: Summary gauge
-        gauge_data = [score, 1 - score]
-        wedge_colors = [color, '#3a3a3a']
+        # Right plot: Suspicion gauge (score=0 human, score=1 deepfake)
+        gauge_data = [1 - score, score]  # human portion first
+        wedge_colors = ['#2ecc71', color]
         axes[1].pie(gauge_data, colors=wedge_colors, startangle=90,
                     wedgeprops={'width': 0.4, 'edgecolor': '#1c1c1c', 'linewidth': 2})
         axes[1].text(0, 0, f'{score:.2%}', ha='center', va='center',
                      fontsize=22, fontweight='bold', color=color)
-        axes[1].set_title('Humanity Score', color='white', fontsize=12, fontweight='bold')
+        axes[1].set_title('Suspicion Score (0=Human, 1=Fake)', color='white', fontsize=12, fontweight='bold')
         
         fig.suptitle(f'Optical Physics Forensic [v3.0]  —  Verdict: {label}',
                      fontsize=14, fontweight='bold', color=color, y=1.01)
