@@ -97,10 +97,62 @@ class FaceMesh:
     def __exit__(self, *_): self.close()
 
 
+# ── FaceDetection compatibility wrapper ──────────────────────────────────────
+
+class _FakeBBox:
+    def __init__(self, xmin, ymin, width, height):
+        self.xmin, self.ymin = xmin, ymin
+        self.width, self.height = width, height
+
+class _FakeLocationData:
+    def __init__(self, bbox):
+        self.relative_bounding_box = bbox
+
+class _FakeDetection:
+    def __init__(self, bbox):
+        self.location_data = _FakeLocationData(bbox)
+
+class _FaceDetectionResult:
+    def __init__(self, detections):
+        self.detections = detections
+
+class FaceDetection:
+    """Drop-in replacement for mp.solutions.face_detection.FaceDetection"""
+    def __init__(self, model_selection=0, min_detection_confidence=0.5):
+        # We'll use FaceMesh internally to find the face and return a bounding box
+        # This avoid needing to manage multiple .task files
+        self._mesh = FaceMesh(max_num_faces=1, min_detection_confidence=min_detection_confidence)
+
+    def process(self, rgb_frame):
+        res = self._mesh.process(rgb_frame)
+        if res.multi_face_landmarks:
+            lms = res.multi_face_landmarks[0].landmark
+            xs = [lm.x for lm in lms]
+            ys = [lm.y for lm in lms]
+            xmin, xmax = min(xs), max(xs)
+            ymin, ymax = min(ys), max(ys)
+            w = xmax - xmin
+            h = ymax - ymin
+            # Slightly expand to match the expected behavior of face_detection
+            bbox = _FakeBBox(xmin - 0.05 * w, ymin - 0.05 * h, w * 1.1, h * 1.1)
+            return _FaceDetectionResult([_FakeDetection(bbox)])
+        return _FaceDetectionResult(None)
+
+    def close(self):
+        self._mesh.close()
+
+    def __enter__(self): return self
+    def __exit__(self, *_): self.close()
+
+
 # ── Assemble the fake solutions namespace ─────────────────────────────────────
 
 _face_mesh_module = types.SimpleNamespace(FaceMesh=FaceMesh)
-_solutions_ns = types.SimpleNamespace(face_mesh=_face_mesh_module)
+_face_detection_module = types.SimpleNamespace(FaceDetection=FaceDetection)
+_solutions_ns = types.SimpleNamespace(
+    face_mesh=_face_mesh_module,
+    face_detection=_face_detection_module
+)
 
 # Attach to the live mediapipe module object so `import mediapipe as mp;
 # mp.solutions.face_mesh` works everywhere

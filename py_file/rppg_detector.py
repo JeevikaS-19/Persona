@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import mediapipe_compat  # noqa
 import mediapipe as mp
 from scipy.signal import butter, filtfilt, detrend
 from scipy.fft import rfft, rfftfreq
@@ -426,7 +427,7 @@ def run_webcam():
         score, sigs = analyze(frames, return_signals=True, source="webcam", fps=actual_fps)
         label = "DEEPFAKE" if score > 0.5 else "HUMAN"
         print(f"--- Result: {label} (Score: {score:.4f}) ---")
-        # plot_report(sigs, score) # Headless mode
+        plot_report(sigs, score)
 
 if __name__ == "__main__":
     import time

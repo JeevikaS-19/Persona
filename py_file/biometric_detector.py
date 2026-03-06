@@ -1,4 +1,5 @@
 import cv2
+import mediapipe_compat  # noqa
 import mediapipe as mp
 import numpy as np
 import os
@@ -148,9 +149,10 @@ def run_file_upload():
         score, tags = analyze(frames, fps=fps, return_signals=True)
         print("-" * 30)
         print(f"RESULT: {tags['verdict']}")
-        print(f"Suspicion Score: {score:.4f}")
+        print(f"Humanity Score: {score:.4f}")
         print(f"Avg Micro-Jitter: {tags['jitter_avg']:.4f}")
         print("-" * 30)
+        plot_report(tags, score)
 
 if __name__ == "__main__":
     print("Persona Biometric Specialist [v2.0]\n1. Upload | 2. Webcam")

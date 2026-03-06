@@ -185,47 +185,49 @@
                 </div>
             </div>
 
-            <!-- TAB B: 2×2 Forensic Charts -->
-            <div id="tab-B" class="flex-1 grid grid-cols-2 grid-rows-2 gap-4 min-h-0">
+            <!-- TAB B: Forensic Report -->
+            <div id="tab-B" class="flex-1 flex flex-col gap-4 overflow-y-auto pr-2 pb-4 scrollbar-thin scrollbar-thumb-zinc-700 scrollbar-track-transparent">
+                <style>
+                    .report-table { width: 100%; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+                    .report-table th { text-align: left; color: #52525b; padding-bottom: 8px; border-bottom: 1px solid #27272a; }
+                    .report-table td { padding: 8px 0; border-bottom: 1px dashed #27272a; }
+                    .report-table tr:last-child td { border-bottom: none; }
+                    .val-col { text-align: right; font-family: monospace; color: #a1a1aa; }
+                    .bar-bg { width: 100px; height: 6px; background: rgba(255,255,255,0.05); border-radius: 3px; overflow: hidden; display: inline-block; vertical-align: middle; margin-right: 8px; }
+                    .bar-fg { height: 100%; border-radius: 3px; }
+                </style>
 
-                <!-- Chart 1: Red Texture-Deviation -->
-                <div class="cyber-panel neon-red rounded-xl p-4 flex flex-col">
-                    <p class="text-[9px] font-bold text-red-500 tracking-widest uppercase mb-2 shrink-0">
-                        Texture-Deviation</p>
-                    <div id="c1-await" class="await-state flex-1"><i data-lucide="bar-chart-2" class="h-5 w-5"></i>
-                        <p class="text-[9px] font-mono">Awaiting</p>
-                    </div>
-                    <div id="c1-wrap" class="hidden flex-1 relative"><canvas id="chart-texture"></canvas></div>
+                <!-- Specialists -->
+                <div class="cyber-panel rounded-xl p-5 border-l-2 border-l-blue-500">
+                    <h3 class="text-[10px] font-bold text-white tracking-widest uppercase mb-4">Specialist Breakdown</h3>
+                    <table class="report-table" id="table-specialists">
+                        <tr><th>Specialist</th><th class="text-right">Score</th></tr>
+                        <!-- populated via js -->
+                    </table>
                 </div>
 
-                <!-- Chart 2: Motion-Vector Scatter -->
-                <div class="cyber-panel neon-blue rounded-xl p-4 flex flex-col">
-                    <p class="text-[9px] font-bold text-blue-400 tracking-widest uppercase mb-2 shrink-0">Motion-Vector
-                        Map</p>
-                    <div id="c2-await" class="await-state flex-1"><i data-lucide="scatter-chart" class="h-5 w-5"></i>
-                        <p class="text-[9px] font-mono">Awaiting</p>
-                    </div>
-                    <div id="c2-wrap" class="hidden flex-1 relative"><canvas id="chart-motion"></canvas></div>
+                <!-- Environment -->
+                <div class="cyber-panel rounded-xl p-5 border-l-2 border-l-emerald-500">
+                    <h3 class="text-[10px] font-bold text-white tracking-widest uppercase mb-4">Environment Flags</h3>
+                    <table class="report-table" id="table-environment">
+                        <!-- populated via js -->
+                    </table>
                 </div>
 
-                <!-- Chart 3: Green rPPG Pulse Wave -->
-                <div class="cyber-panel neon-green rounded-xl p-4 flex flex-col">
-                    <p class="text-[9px] font-bold text-emerald-400 tracking-widest uppercase mb-2 shrink-0">rPPG Pulse
-                        Wave</p>
-                    <div id="c3-await" class="await-state flex-1"><i data-lucide="activity" class="h-5 w-5"></i>
-                        <p class="text-[9px] font-mono">Awaiting</p>
-                    </div>
-                    <div id="c3-wrap" class="hidden flex-1 relative"><canvas id="chart-rppg"></canvas></div>
+                <!-- Forensic Signals -->
+                <div class="cyber-panel rounded-xl p-5 border-l-2 border-l-purple-500">
+                    <h3 class="text-[10px] font-bold text-white tracking-widest uppercase mb-4">Forensic Signals</h3>
+                    <table class="report-table" id="table-forensics">
+                        <!-- populated via js -->
+                    </table>
                 </div>
 
-                <!-- Chart 4: Frequency-Domain Spectrogram -->
-                <div class="cyber-panel neon-purple rounded-xl p-4 flex flex-col">
-                    <p class="text-[9px] font-bold text-purple-400 tracking-widest uppercase mb-2 shrink-0">
-                        Frequency-Domain</p>
-                    <div id="c4-await" class="await-state flex-1"><i data-lucide="radio" class="h-5 w-5"></i>
-                        <p class="text-[9px] font-mono">Awaiting</p>
-                    </div>
-                    <div id="c4-wrap" class="hidden flex-1 relative"><canvas id="chart-freq"></canvas></div>
+                <!-- Telemetry -->
+                <div class="cyber-panel rounded-xl p-5 border-l-2 border-l-zinc-500">
+                    <h3 class="text-[10px] font-bold text-white tracking-widest uppercase mb-4">Telemetry</h3>
+                    <table class="report-table" id="table-telemetry">
+                        <!-- populated via js -->
+                    </table>
                 </div>
             </div>
         </div>
@@ -419,56 +421,64 @@
                 options: { responsive: true, maintainAspectRatio: false, cutout: '85%', rotation: -135, circumference: 270, plugins: { legend: { display: false }, tooltip: { enabled: false } } }
             });
 
-            // --- Tab B: Charts ---
-            const noLegend = { legend: { display: false }, tooltip: { enabled: false } };
-            const faintGrid = (c) => ({ x: { display: false }, y: { display: true, border: { display: false }, grid: { color: `rgba(${c},0.05)` } } });
+            // --- Tab B: Report Rendering ---
+            const m = data.metrics || {};
+            const env = data.environment || {};
+            const fos = data.forensics || {};
+            const tel = data.telemetry || {};
 
-            // Chart 1: Texture deviation — derived from score variance as proxy
-            showChart('c1');
-            const texData = Array.from({ length: 60 }, (_, i) => ((score * 2 - 1) + Math.sin(i / 4) * 0.5 + (Math.random() * 0.4 - 0.2)));
-            if (textureChart) textureChart.destroy();
-            textureChart = new Chart(document.getElementById('chart-texture'), {
-                type: 'line',
-                data: { labels: new Array(60).fill(''), datasets: [{ data: texData, borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.08)', fill: true, tension: 0.4, borderWidth: 2, pointRadius: 0 }] },
-                options: { responsive: true, maintainAspectRatio: false, plugins: noLegend, scales: faintGrid('239,68,68') }
+            // 1. Specialists
+            const spTable = document.getElementById('table-specialists');
+            let spHTML = '<tr><th>Specialist</th><th class="text-right">Score</th></tr>';
+            const specialists = [
+                { name: 'rPPG (Heart-Rate)', score: m.rppg_score },
+                { name: 'Sync (Lip-Sync)', score: m.sync_score },
+                { name: 'Bio (Eye-Jitter)', score: m.biometric_score },
+                { name: 'Refl (Corneal Phys.)', score: m.reflection_score }
+            ];
+            if (m.spatial_score !== undefined && m.spatial_score !== null) {
+                specialists.push({ name: 'Spat (AI Smoothness)', score: m.spatial_score });
+            }
+            specialists.forEach(sp => {
+                const s = sp.score || 0;
+                const isWarn = s >= 0.65;
+                const fgCol = isWarn ? '#ef4444' : '#3b82f6';
+                spHTML += `<tr>
+                    <td>${sp.name}</td>
+                    <td class="val-col">
+                        <div class="bar-bg"><div class="bar-fg" style="width: ${Math.min(s*100, 100)}%; background: ${fgCol}"></div></div>
+                        <span style="color: ${isWarn ? '#ef4444' : '#a1a1aa'}">${s.toFixed(4)}${isWarn ? ' ⚠' : ''}</span>
+                    </td>
+                </tr>`;
             });
+            spTable.innerHTML = spHTML;
 
-            // Chart 2: Motion-vector scatter — derived from sync_score
-            showChart('c2');
-            const syncS = data.sync_score || 0.5;
-            const motData = Array.from({ length: 50 }, () => ({ x: (Math.random() - 0.5) * (syncS * 12), y: (Math.random() - 0.5) * (syncS * 12) }));
-            if (motionChart) motionChart.destroy();
-            motionChart = new Chart(document.getElementById('chart-motion'), {
-                type: 'scatter',
-                data: { datasets: [{ data: motData, backgroundColor: '#60a5fa', borderColor: 'rgba(96,165,250,0.4)', pointRadius: 3 }] },
-                options: { responsive: true, maintainAspectRatio: false, plugins: noLegend, scales: { x: { display: true, grid: { color: 'rgba(96,165,250,0.05)' } }, y: { display: true, grid: { color: 'rgba(96,165,250,0.05)' } } } }
-            });
+            // 2. Environment
+            const envTable = document.getElementById('table-environment');
+            envTable.innerHTML = `
+                <tr><td>Avg Luminance (lux)</td><td class="val-col">${env.lux || 'N/A'}</td></tr>
+                <tr><td>Low-Light Flag</td><td class="val-col font-bold ${env.low_light ? 'text-red-400' : 'text-zinc-500'}">${env.low_light ? 'YES ⚠' : 'No'}</td></tr>
+                <tr><td>Shaky Camera</td><td class="val-col font-bold ${env.shaky ? 'text-red-400' : 'text-zinc-500'}">${env.shaky ? 'YES ⚠' : 'No'}</td></tr>
+                <tr><td>Film Grain Detected</td><td class="val-col font-bold ${env.grainy ? 'text-red-400' : 'text-zinc-500'}">${env.grainy ? 'YES ⚠' : 'No'}</td></tr>
+            `;
 
-            // Chart 3: rPPG wave — use real rppg_graph from backend if available
-            showChart('c3');
-            const rppgRaw = (Array.isArray(data.rppg_graph) && data.rppg_graph.length > 5) ? data.rppg_graph : Array.from({ length: 80 }, (_, i) => Math.sin(i / 8) * 0.8 + (Math.random() * 0.2 - 0.1));
-            if (rppgChart) rppgChart.destroy();
-            rppgChart = new Chart(document.getElementById('chart-rppg'), {
-                type: 'line',
-                data: { labels: new Array(rppgRaw.length).fill(''), datasets: [{ data: rppgRaw, borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.08)', fill: true, tension: 0.4, borderWidth: 2, pointRadius: 0 }] },
-                options: { responsive: true, maintainAspectRatio: false, plugins: noLegend, scales: faintGrid('16,185,129') }
-            });
+            // 3. Forensics
+            const fosTable = document.getElementById('table-forensics');
+            fosTable.innerHTML = `
+                <tr><td>Eye-Jitter Avg (px)</td><td class="val-col">${fos.jitter !== undefined && fos.jitter !== null ? fos.jitter.toFixed(4) : 'N/A'}</td></tr>
+                <tr><td>rPPG Specialist Fault</td><td class="val-col font-bold ${fos.rppg_fault ? 'text-yellow-500' : 'text-zinc-500'}">${fos.rppg_fault ? 'YES ⚠' : 'No'}</td></tr>
+                <tr><td>Sync Specialist Fault</td><td class="val-col font-bold ${fos.sync_fault ? 'text-yellow-500' : 'text-zinc-500'}">${fos.sync_fault ? 'YES ⚠' : 'No'}</td></tr>
+                <tr><td>Bio Specialist Fault</td><td class="val-col font-bold ${fos.biometric_fault ? 'text-yellow-500' : 'text-zinc-500'}">${fos.biometric_fault ? 'YES ⚠' : 'No'}</td></tr>
+            `;
 
-            // Chart 4: Frequency domain — derived from biometric + reflection scores
-            showChart('c4');
-            const freqBase = (data.biometric_score || 0.5);
-            const freqData2 = Array.from({ length: 30 }, (_, i) => (Math.abs(Math.sin(i * freqBase * 3)) * 100 * (0.6 + Math.random() * 0.4)));
-            if (freqChart) freqChart.destroy();
-            freqChart = new Chart(document.getElementById('chart-freq'), {
-                type: 'bar',
-                data: { labels: new Array(30).fill(''), datasets: [{ data: freqData2, backgroundColor: '#c084fc', borderRadius: 2 }] },
-                options: { responsive: true, maintainAspectRatio: false, plugins: noLegend, scales: faintGrid('192,132,252') }
-            });
-        }
-
-        function showChart(id) {
-            document.getElementById(`${id}-await`).classList.add('hidden');
-            document.getElementById(`${id}-wrap`).classList.remove('hidden');
+            // 4. Telemetry
+            const telTable = document.getElementById('table-telemetry');
+            telTable.innerHTML = `
+                <tr><td>Compute Time (s)</td><td class="val-col">${tel.compute_time || '?'}</td></tr>
+                <tr><td>Frames Analysed</td><td class="val-col">${tel.frames_analyzed || '?'}</td></tr>
+                <tr><td>Resampled FPS</td><td class="val-col">${tel.resampled_fps || '?'}</td></tr>
+                <tr><td>Video Trimmed</td><td class="val-col">${tel.trimmed ? 'Yes (5s)' : 'No'}</td></tr>
+            `;
         }
 
         // --- Tab switcher ---

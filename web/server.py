@@ -83,6 +83,10 @@ def analyze_bridge():
                 bridge_response = {
                     "verdict": m.get("classification"),
                     "score": m.get("ensemble_score"),
+                    "metrics": m,
+                    "environment": result.get("environment", {}),
+                    "forensics": f,
+                    "telemetry": result.get("telemetry", {}),
                     "rppg_graph": f.get("filtered", []),
                     "sync_score": m.get("sync_score"),
                     "biometric_score": m.get("biometric_score"),

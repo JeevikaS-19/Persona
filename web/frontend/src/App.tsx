@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { io } from 'socket.io-client';
 import { Shield, Camera, Upload, Activity, AlertTriangle, CheckCircle2, Zap, RefreshCw, BarChart3, Database, Thermometer, Terminal, Cpu, Info } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Line, Bar, Doughnut } from 'react-chartjs-2';
+import { Doughnut } from 'react-chartjs-2';
 
 import {
   Chart as ChartJS,
@@ -152,20 +152,20 @@ export default function App() {
           const data = await res.json();
           // Map Bridge JSON to UI expected structure
           const mappedReport = {
-            metrics: {
+            metrics: data.metrics || {
               classification: data.verdict,
               ensemble_score: data.score,
               sync_score: data.sync_score,
               biometric_score: data.biometric_score,
               reflection_score: data.reflection_score,
-              rppg_score: data.score * 0.9 // Heuristic for rPPG component
+              rppg_score: data.score * 0.9
             },
-            forensics: {
+            forensics: data.forensics || {
               filtered: data.rppg_graph,
-              bpm: 72 // Fallback for headless
+              bpm: 72
             },
-            telemetry: { compute_time: 0.8 },
-            environment: { lux: 100 }
+            telemetry: data.telemetry || { compute_time: 0.8 },
+            environment: data.environment || { lux: 100 }
           };
 
           setReport(mappedReport);
@@ -216,7 +216,7 @@ export default function App() {
         const data = await res.json();
 
         const mappedReport = {
-          metrics: {
+          metrics: data.metrics || {
             classification: data.verdict,
             ensemble_score: data.score,
             sync_score: data.sync_score,
@@ -224,12 +224,12 @@ export default function App() {
             reflection_score: data.reflection_score,
             rppg_score: data.score * 0.9
           },
-          forensics: {
+          forensics: data.forensics || {
             filtered: data.rppg_graph,
             bpm: 75
           },
-          telemetry: { compute_time: 1.2 },
-          environment: { lux: 120 }
+          telemetry: data.telemetry || { compute_time: 1.2 },
+          environment: data.environment || { lux: 120 }
         };
 
         setReport(mappedReport);
@@ -280,7 +280,7 @@ export default function App() {
 
             <div className="flex-1 rounded-2xl bg-black/60 border border-white/5 relative overflow-hidden flex items-center justify-center group">
               {activeTab === 'webcam' ? (
-                <video ref={videoRef} autoPlay playsInline muted className="h-full w-full object-cover grayscale opacity-50 contrast-125" />
+                <video ref={videoRef} autoPlay playsInline muted className="h-full w-full object-cover" />
               ) : (
                 <div
                   onClick={() => fileInputRef.current?.click()}
@@ -376,7 +376,9 @@ export default function App() {
                     </h2>
                     <div className="flex items-center gap-2 mt-2">
                       <CheckCircle2 className={`h-4 w-4 ${report.metrics.classification === 'HUMAN' ? 'text-green-500' : 'text-red-500'}`} />
-                      <span className="text-[10px] font-mono text-zinc-400">Ensemble Confidence: {(report.metrics.ensemble_score * 100).toFixed(1)}%</span>
+                      <span className="text-[10px] font-mono text-zinc-400">
+                        Authenticity Score: {(report.metrics.ensemble_score).toLocaleString('en-US', { style: 'percent', minimumFractionDigits: 1 })}
+                      </span>
                     </div>
                   </div>
                   <div className="w-40 h-40">
@@ -384,8 +386,11 @@ export default function App() {
                       data={{
                         labels: ['Synthetic', 'Organic'],
                         datasets: [{
-                          data: [report.metrics.ensemble_score * 100, (1 - report.metrics.ensemble_score) * 100],
-                          backgroundColor: [report.metrics.classification === 'HUMAN' ? '#22c55e' : '#ef4444', '#18181b'],
+                          data: [
+                            (1 - report.metrics.ensemble_score) * 100,
+                            report.metrics.ensemble_score * 100
+                          ],
+                          backgroundColor: ['#ef4444', '#22c55e'],
                           borderWidth: 0,
                         }]
                       }}
@@ -394,66 +399,106 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Charts Grid */}
-                <div className="grid grid-cols-2 gap-4 flex-1 min-h-0">
-                  <div className="bg-black/30 border border-white/5 rounded-2xl p-6 flex flex-col">
-                    <div className="flex items-center justify-between mb-4">
-                      <span className="text-[10px] font-bold text-zinc-500 tracking-widest flex items-center gap-2 uppercase">
-                        <Activity className="h-3 w-3 text-red-500" /> Physiological_BVP
-                      </span>
-                      <span className="text-[10px] font-mono text-zinc-400">{report.forensics?.bpm} BPM</span>
-                    </div>
-                    <div className="flex-1 min-h-0">
-                      <Line
-                        data={{
-                          labels: report.forensics?.filtered ? new Array(report.forensics.filtered.length).fill('') : [],
-                          datasets: [{
-                            data: report.forensics?.filtered || [],
-                            borderColor: '#ef4444',
-                            borderWidth: 1.5,
-                            pointRadius: 0,
-                            tension: 0.4,
-                            fill: true,
-                            backgroundColor: 'rgba(239, 68, 68, 0.05)'
-                          }]
-                        }}
-                        options={{ responsive: true, maintainAspectRatio: false, scales: { x: { display: false }, y: { display: false } }, plugins: { legend: { display: false } } }}
-                      />
+                {/* Forensic Tables Grid */}
+                <div className="grid grid-cols-2 gap-4 flex-1 min-h-0 overflow-y-auto pr-2 custom-scrollbar">
+
+                  {/* Specialists */}
+                  <div className="bg-black/30 border-l-2 border-l-blue-500 rounded-2xl p-5 flex flex-col">
+                    <h3 className="text-[10px] font-bold text-white tracking-widest uppercase mb-4">Specialist Breakdown</h3>
+                    <div className="flex flex-col gap-3 flex-1 text-xs">
+                      {[
+                        { name: 'rPPG (Heart-Rate)', score: report.metrics?.rppg_score },
+                        { name: 'Sync (Lip-Sync)', score: report.metrics?.sync_score },
+                        { name: 'Bio (Eye-Jitter)', score: report.metrics?.biometric_score },
+                        { name: 'Refl (Corneal Phys.)', score: report.metrics?.reflection_score },
+                        ...(report.metrics?.spatial_score !== undefined && report.metrics?.spatial_score !== null
+                          ? [{ name: 'Spat (AI Smoothness)', score: report.metrics.spatial_score }] : [])
+                      ].map(sp => {
+                        const s = sp.score || 0;
+                        const isWarn = s <= 0.35;
+                        return (
+                          <div key={sp.name} className="flex items-center justify-between border-b border-white/5 pb-2">
+                            <span className="text-zinc-400 uppercase">{sp.name}</span>
+                            <div className="flex items-center gap-3">
+                              <div className="w-16 h-1.5 bg-white/5 rounded-full overflow-hidden">
+                                <div className={`h-full ${isWarn ? 'bg-red-500' : 'bg-blue-500'}`} style={{ width: `${Math.min(s * 100, 100)}%` }} />
+                              </div>
+                              <span className={`font-mono ${isWarn ? 'text-red-500' : 'text-zinc-500'}`}>
+                                {s.toFixed(4)}{isWarn && ' ⚠'}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
 
-                  <div className="bg-black/30 border border-white/5 rounded-2xl p-6 flex flex-col">
-                    <div className="flex items-center justify-between mb-4">
-                      <span className="text-[10px] font-bold text-zinc-500 tracking-widest flex items-center gap-2 uppercase">
-                        <BarChart3 className="h-3 w-3 text-blue-500" /> Specialist_Consensus
-                      </span>
-                      <span className="text-[10px] font-mono text-zinc-400">Total Audit Components: 4</span>
+                  {/* Environment */}
+                  <div className="bg-black/30 border-l-2 border-l-emerald-500 rounded-2xl p-5 flex flex-col">
+                    <h3 className="text-[10px] font-bold text-white tracking-widest uppercase mb-4">Environment Flags</h3>
+                    <div className="flex flex-col gap-3 flex-1 text-xs">
+                      <div className="flex items-center justify-between border-b border-white/5 pb-2">
+                        <span className="text-zinc-400 uppercase">Avg Luminance (lux)</span>
+                        <span className="font-mono text-zinc-500">{report.environment?.lux || 'N/A'}</span>
+                      </div>
+                      <div className="flex items-center justify-between border-b border-white/5 pb-2">
+                        <span className="text-zinc-400 uppercase">Low-Light Flag</span>
+                        <span className={`font-mono font-bold ${report.environment?.low_light ? 'text-red-400' : 'text-zinc-500'}`}>{report.environment?.low_light ? 'YES ⚠' : 'No'}</span>
+                      </div>
+                      <div className="flex items-center justify-between border-b border-white/5 pb-2">
+                        <span className="text-zinc-400 uppercase">Shaky Camera</span>
+                        <span className={`font-mono font-bold ${report.environment?.shaky ? 'text-red-400' : 'text-zinc-500'}`}>{report.environment?.shaky ? 'YES ⚠' : 'No'}</span>
+                      </div>
+                      <div className="flex items-center justify-between border-b border-white/5 pb-2 border-none">
+                        <span className="text-zinc-400 uppercase">Film Grain Detected</span>
+                        <span className={`font-mono font-bold ${report.environment?.grainy ? 'text-red-400' : 'text-zinc-500'}`}>{report.environment?.grainy ? 'YES ⚠' : 'No'}</span>
+                      </div>
                     </div>
-                    <div className="flex-1 min-h-0">
-                      <Bar
-                        data={{
-                          labels: ['Heart', 'Lip', 'Eye-J', 'Eye-R'],
-                          datasets: [{
-                            data: [
-                              report.metrics.rppg_score,
-                              report.metrics.sync_score,
-                              report.metrics.biometric_score,
-                              report.metrics.reflection_score
-                            ],
-                            backgroundColor: ['#ef4444', '#3b82f6', '#f59e0b', '#06b6d4'],
-                            borderRadius: 4
-                          }]
-                        }}
-                        options={{
-                          responsive: true,
-                          maintainAspectRatio: false,
-                          scales: {
-                            x: { display: true, ticks: { color: '#71717a', font: { size: 8 } } },
-                            y: { display: false, min: 0, max: 1 }
-                          },
-                          plugins: { legend: { display: false } }
-                        }}
-                      />
+                  </div>
+
+                  {/* Forensic Signals */}
+                  <div className="bg-black/30 border-l-2 border-l-purple-500 rounded-2xl p-5 flex flex-col">
+                    <h3 className="text-[10px] font-bold text-white tracking-widest uppercase mb-4">Forensic Signals</h3>
+                    <div className="flex flex-col gap-3 flex-1 text-xs">
+                      <div className="flex items-center justify-between border-b border-white/5 pb-2">
+                        <span className="text-zinc-400 uppercase">Eye-Jitter Avg (px)</span>
+                        <span className="font-mono text-zinc-500">{(report.forensics?.jitter ?? 'N/A')?.toString()?.substring(0, 6)}</span>
+                      </div>
+                      <div className="flex items-center justify-between border-b border-white/5 pb-2">
+                        <span className="text-zinc-400 uppercase">rPPG Specialist Fault</span>
+                        <span className={`font-mono font-bold ${report.forensics?.rppg_fault ? 'text-yellow-500' : 'text-zinc-500'}`}>{report.forensics?.rppg_fault ? 'YES ⚠' : 'No'}</span>
+                      </div>
+                      <div className="flex items-center justify-between border-b border-white/5 pb-2">
+                        <span className="text-zinc-400 uppercase">Sync Specialist Fault</span>
+                        <span className={`font-mono font-bold ${report.forensics?.sync_fault ? 'text-yellow-500' : 'text-zinc-500'}`}>{report.forensics?.sync_fault ? 'YES ⚠' : 'No'}</span>
+                      </div>
+                      <div className="flex items-center justify-between border-b border-white/5 pb-2 border-none">
+                        <span className="text-zinc-400 uppercase">Bio Specialist Fault</span>
+                        <span className={`font-mono font-bold ${report.forensics?.biometric_fault ? 'text-yellow-500' : 'text-zinc-500'}`}>{report.forensics?.biometric_fault ? 'YES ⚠' : 'No'}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Telemetry */}
+                  <div className="bg-black/30 border-l-2 border-l-zinc-500 rounded-2xl p-5 flex flex-col">
+                    <h3 className="text-[10px] font-bold text-white tracking-widest uppercase mb-4">Telemetry</h3>
+                    <div className="flex flex-col gap-3 flex-1 text-xs">
+                      <div className="flex items-center justify-between border-b border-white/5 pb-2">
+                        <span className="text-zinc-400 uppercase">Compute Time (s)</span>
+                        <span className="font-mono text-zinc-500">{report.telemetry?.compute_time || '?'}</span>
+                      </div>
+                      <div className="flex items-center justify-between border-b border-white/5 pb-2">
+                        <span className="text-zinc-400 uppercase">Frames Analysed</span>
+                        <span className="font-mono text-zinc-500">{report.telemetry?.frames_analyzed || '?'}</span>
+                      </div>
+                      <div className="flex items-center justify-between border-b border-white/5 pb-2">
+                        <span className="text-zinc-400 uppercase">Resampled FPS</span>
+                        <span className="font-mono text-zinc-500">{report.telemetry?.resampled_fps || '?'}</span>
+                      </div>
+                      <div className="flex items-center justify-between border-b border-white/5 pb-2 border-none">
+                        <span className="text-zinc-400 uppercase">Video Trimmed</span>
+                        <span className="font-mono text-zinc-500">{report.telemetry?.trimmed ? 'Yes (5s)' : 'No'}</span>
+                      </div>
                     </div>
                   </div>
                 </div>

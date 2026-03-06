@@ -1,7 +1,24 @@
+import os
+import sys
+import warnings
+
+# Suppress MediaPipe / TensorFlow Lite internal C++ log noise (env vars must be first)
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["GLOG_minloglevel"]     = "3"
+os.environ["MEDIAPIPE_DISABLE_GPU"] = "1"
+
+# GLOG writes directly to the stderr file-descriptor, bypassing Python env vars.
+# Redirect stderr to devnull before any mediapipe/TFLite import to silence it.
+_devnull = open(os.devnull, 'w')
+sys.stderr = _devnull
+
+# Suppress librosa / audioread deprecation warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+
 import cv2
 import asyncio
 import numpy as np
-import os
 import json
 import logging
 import time
@@ -14,6 +31,7 @@ from sync_detector import analyze as analyze_sync
 from biometric_detector import analyze as analyze_biometric
 from reflection_detector import analyze as analyze_reflection
 from moviepy.video.io.VideoFileClip import VideoFileClip
+import mediapipe_compat  # noqa
 import mediapipe as mp
 import pandas as pd
 
@@ -65,7 +83,7 @@ class EnvironmentalAnalyzer:
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[logging.StreamHandler()]
+    handlers=[logging.StreamHandler(sys.stdout)]  # stdout only — stderr is devnull
 )
 logger = logging.getLogger("PersonaEngine")
 
@@ -121,7 +139,7 @@ def resample_to_fps(frames, original_fps, target_fps=10):
     stride = max(1, int(original_fps / target_fps))
     return frames[::stride]
 
-async def analyze_video_production(video_path, progress_callback=None, signal_callback=None):
+async def analyze_video_production(video_path, source_type="upload", progress_callback=None, signal_callback=None):
     """
     Sentinel Production Engine:
     - 5s Trimming for memory safety
@@ -144,8 +162,9 @@ async def analyze_video_production(video_path, progress_callback=None, signal_ca
                 from moviepy.video.io.VideoFileClip import VideoFileClip
                 temp_trim_path = video_path.replace('.', '_trimmed.')
                 with VideoFileClip(video_path) as clip:
-                    # Immediately trim to first 5s to prevent laptop overflow
-                    trimmed = clip.subclip(0, min(5, clip.duration))
+                    end = min(5, clip.duration)
+                    # moviepy v2.x renamed subclip -> subclipped
+                    trimmed = clip.subclipped(0, end) if hasattr(clip, 'subclipped') else clip.subclip(0, end)
                     trimmed.write_videofile(temp_trim_path, codec="libx264", audio_codec="aac", logger=None)
                 video_path = temp_trim_path
                 logger.info("Trimmed to 5s for deployment stability.")
@@ -213,7 +232,7 @@ async def analyze_video_production(video_path, progress_callback=None, signal_ca
                     sync_data = await asyncio.to_thread(analyze_sync, frames, audio, sr=sr, fps=fs)
                     sync_score, sync_tags = sync_data if isinstance(sync_data, tuple) else (sync_data, {})
             except Exception as e:
-                logger.error(f"Sync Specialist Failure: {e}")
+                logger.debug(f"Sync Specialist: no usable audio ({e or 'silent/no audio track'})")
                 sync_tags = {"error": str(e)}
 
             # Specialist C: Biometric (Saccade)
@@ -234,25 +253,38 @@ async def analyze_video_production(video_path, progress_callback=None, signal_ca
                 logger.error(f"Reflection Specialist Failure: {e}")
                 reflection_tags = {"error": str(e)}
 
-            # Specialist C: Keyframe Spatial Artifacts (Optimization Directive)
-            try:
-                import random
-                key_indices = random.sample(range(len(frames)), min(3, len(frames)))
-                key_scores = []
-                for idx in key_indices:
-                    # Simple Laplacian variance check as a proxy for 'blurry/AI soft' artifacts
-                    # Synthetic faces often have inconsistent edge sharpness
-                    var = cv2.Laplacian(frames[idx], cv2.CV_64F).var()
-                    key_scores.append(1.0 if var < 100 else 0.2) # Low var = potential AI smoothness
-                spatial_score = np.mean(key_scores)
-                logger.info(f"Keyframe Strategy: Spatial audit (3 frames) complete. Score: {spatial_score}")
-            except Exception as e:
-                logger.error(f"Spatial Specialist Failure: {e}")
+            # Specialist E: Keyframe Spatial Artifacts (Upload only — not meaningful for live webcam)
+            spatial_score = None
+            if source_type == "upload":
+                try:
+                    import random
+                    key_indices = random.sample(range(len(frames)), min(3, len(frames)))
+                    key_scores = []
+                    for idx in key_indices:
+                        var = cv2.Laplacian(frames[idx], cv2.CV_64F).var()
+                        key_scores.append(1.0 if var < 100 else 0.2)
+                    spatial_score = float(np.mean(key_scores))
+                    logger.info(f"Keyframe Strategy: Spatial audit (3 frames) complete. Score: {spatial_score}")
+                except Exception as e:
+                    logger.error(f"Spatial Specialist Failure: {e}")
 
+            # Explicitly invert scores to be Authenticity Metrics (1.0 = Human, 0.0 = Deepfake)
+            rppg_score = 1.0 - rppg_score
+            sync_score = 1.0 - sync_score
+            biometric_score = 1.0 - biometric_score
+            reflection_score = 1.0 - reflection_score
+            
             # Final Summary (Ensemble weighted)
-            # Weights: rPPG(0.3), Sync(0.2), Biometric(0.3), Reflection(0.1), Spatial(0.1)
-            ensemble_score = (rppg_score * 0.3) + (sync_score * 0.2) + (biometric_score * 0.3) + (reflection_score * 0.1) + (spatial_score * 0.1)
-            classification = "DEEPFAKE" if ensemble_score > 0.5 else "HUMAN"
+            # Upload: rPPG(0.3) Sync(0.2) Bio(0.3) Refl(0.1) Spatial(0.1)
+            # Webcam: rPPG(0.35) Sync(0.25) Bio(0.30) Refl(0.10)  — no spatial
+            if spatial_score is not None:
+                spatial_score = 1.0 - spatial_score
+                ensemble_score = (rppg_score * 0.3) + (sync_score * 0.2) + (biometric_score * 0.3) + (reflection_score * 0.1) + (spatial_score * 0.1)
+            else:
+                ensemble_score = (rppg_score * 0.35) + (sync_score * 0.25) + (biometric_score * 0.30) + (reflection_score * 0.10)
+            
+            # Threshold inverted to match Authenticity scale (<= 0.35 means Deepfake)
+            classification = "DEEPFAKE" if ensemble_score <= 0.35 else "HUMAN"
             
             return {
                 "status": "completed",
@@ -262,17 +294,17 @@ async def analyze_video_production(video_path, progress_callback=None, signal_ca
                     "rppg_score": round(float(rppg_score), 4),
                     "sync_score": round(float(sync_score), 4),
                     "biometric_score": round(float(biometric_score), 4),
-                    "reflection_score": round(float(reflection_score), 4),
-                    "spatial_score": round(float(spatial_score), 4),
+                     "reflection_score": round(float(reflection_score), 4),
+                    "spatial_score": round(spatial_score, 4) if spatial_score is not None else None,
                     "classification": classification
                 },
                 "environment": env,
                 "forensics": {
                     "bpm": rppg_tags.get("bpm", 0),
-                    "filtered": rppg_tags.get("filtered", []),
-                    "audio_amp": sync_tags.get("audio_amp", []),
-                    "v_dist": sync_tags.get("v_dist", []),
-                    "jitter": biometric_tags.get("jitter_avg", 0),
+                    "jitter": biometric_tags.get("jitter_avg"),
+                    "morphology_r2": reflection_tags.get("morphology_r2", 0.0),
+                    "parallax_fails": reflection_tags.get("parallax_fails", 0),
+                    "blink_fails": reflection_tags.get("blink_persistence", 0),
                     "rppg_fault": "error" in rppg_tags,
                     "sync_fault": "error" in sync_tags,
                     "biometric_fault": "error" in biometric_tags
@@ -339,38 +371,93 @@ async def run_cli_audit(source_type="webcam", file_path=None):
         for f in frames: out.write(f)
         out.release()
         
-        result = await analyze_video_production(temp_path)
+        result = await analyze_video_production(temp_path, source_type=source_type)
         
         if result["status"] == "completed":
-            m = result["metrics"]
-            print("\n" + "="*40)
-            print(f"FINAL CONSENSUS: {m['classification']}")
-            print(f"Overall Suspicion Score: {m['ensemble_score']:.4f}")
-            print("-" * 40)
-            print(f"-> Heart Rate Consistency: {m['rppg_score']:.4f}")
-            print(f"-> Lip-Sync Correlation:  {m['sync_score']:.4f}")
-            print(f"-> Biometric Eye-Jitter:  {m['biometric_score']:.4f}")
-            print(f"-> Corneal Physics:       {m['reflection_score']:.4f}")
-            print("="*40 + "\n")
+            m   = result["metrics"]
+            env = result.get("environment", {})
+            fos = result.get("forensics", {})
+            tel = result.get("telemetry", {})
 
-            # Option to save report to Pendrive
-            save_choice = input("Save Forensic Report? (y/n): ").strip().lower()
-            if save_choice == 'y':
-                import tkinter as tk
-                from tkinter import filedialog
-                root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
-                save_path = filedialog.asksaveasfilename(
-                    defaultextension=".csv",
-                    filetypes=[("CSV files", "*.csv")],
-                    title="Export Forensic Audit to Pendrive",
-                    initialfile=f"persona_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-                )
-                root.destroy()
-                if save_path:
-                    # Flatten metrics and environment for a flat CSV report
-                    report_data = {**m, **result.get("environment", {})}
-                    pd.DataFrame([report_data]).to_csv(save_path, index=False)
-                    print(f"[+] Report exported to: {save_path}")
+            verdict = m["classification"]
+            score   = m["ensemble_score"]
+            bar_len = 40
+            filled  = int(score * bar_len)
+            bar     = "█" * filled + "░" * (bar_len - filled)
+
+            print("\n" + "╔" + "═"*58 + "╗")
+            print(f"║  {'PERSONA SENTINEL — FORENSIC AUDIT REPORT':^54}  ║")
+            print("╠" + "═"*58 + "╣")
+            print(f"║  File : {result.get('filename','unknown'):<48}  ║")
+            print(f"║  Time : {datetime.now().strftime('%Y-%m-%d  %H:%M:%S'):<48}  ║")
+            print("╠" + "═"*58 + "╣")
+
+            # Verdict banner
+            flag = "🔴  DEEPFAKE DETECTED" if verdict == "DEEPFAKE" else "🟢  GENUINE / HUMAN"
+            print(f"║  VERDICT  :  {flag:<44}  ║")
+            print(f"║  Ensemble :  [{bar}] {score:.2%}  ║")
+            print("╠" + "═"*58 + "╣")
+
+            # Specialist scores
+            print("║  SPECIALIST BREAKDOWN                                    ║")
+            print("╠" + "─"*58 + "╣")
+            specialists = [
+                ("rPPG  (Heart-Rate)",    m["rppg_score"]),
+                ("Sync  (Lip-Sync)",      m["sync_score"]),
+                ("Bio   (Eye-Jitter)",    m["biometric_score"]),
+                ("Refl  (Corneal Phys.)", m["reflection_score"]),
+            ]
+            if m.get("spatial_score") is not None:
+                specialists.append(("Spat  (AI Smoothness)", m["spatial_score"]))
+            for name, s in specialists:
+                mini_bar = "█" * int(s * 20) + "░" * (20 - int(s * 20))
+                flag_sp  = " ⚠" if s <= 0.35 else "  "
+                print(f"║  {name:<22} [{mini_bar}] {s:.4f}{flag_sp}  ║")
+
+            # Environment
+            print("╠" + "═"*58 + "╣")
+            print("║  ENVIRONMENT                                             ║")
+            print("╠" + "─"*58 + "╣")
+            env_items = [
+                ("Avg Luminance (lux)", f"{env.get('lux', 'N/A')}"),
+                ("Low-Light Flag",      "YES ⚠" if env.get("low_light") else "No"),
+                ("Shaky Camera",        "YES ⚠" if env.get("shaky")     else "No"),
+                ("Film Grain Detected", "YES ⚠" if env.get("grainy")    else "No"),
+            ]
+            for k, v in env_items:
+                print(f"║  {k:<28}  {v:<26}  ║")
+
+            # Forensic signals
+            print("╠" + "═"*58 + "╣")
+            print("║  FORENSIC SIGNALS                                        ║")
+            print("╠" + "─"*58 + "╣")
+            jitter = fos.get("jitter", None)
+            fos_items = [
+                ("Eye-Jitter Avg (px)", f"{jitter:.4f}" if jitter is not None else "N/A"),
+                ("Morphology Fit (R2)", f"{fos.get('morphology_r2', 0):.2%}"),
+                ("Zero Parallax Frames", f"{fos.get('parallax_fails', 0)}"),
+                ("Baked Blink Fails", f"{fos.get('blink_fails', 0)}"),
+                ("rPPG Specialist Fault", "YES ⚠" if fos.get("rppg_fault")      else "No"),
+                ("Sync Specialist Fault", "YES ⚠" if fos.get("sync_fault")      else "No"),
+                ("Bio  Specialist Fault", "YES ⚠" if fos.get("biometric_fault") else "No"),
+            ]
+            for k, v in fos_items:
+                print(f"║  {k:<28}  {v:<26}  ║")
+                
+            # Telemetry
+            print("╠" + "═"*58 + "╣")
+            print("║  TELEMETRY                                               ║")
+            print("╠" + "─"*58 + "╣")
+            tel_items = [
+                ("Compute Time (s)",   f"{tel.get('compute_time', '?')}"),
+                ("Frames Analysed",    f"{tel.get('frames_analyzed', '?')}"),
+                ("Resampled FPS",      f"{tel.get('resampled_fps', '?')}"),
+                ("Video Trimmed",      "Yes (5s)" if tel.get("trimmed") else "No"),
+            ]
+            for k, v in tel_items:
+                print(f"║  {k:<28}  {v:<26}  ║")
+
+            print("╚" + "═"*58 + "╝\n")
         else:
             print(f"[!] Engine Error: {result.get('message')}")
             

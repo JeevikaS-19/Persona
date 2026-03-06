@@ -1,4 +1,5 @@
 import cv2
+import mediapipe_compat  # noqa
 import mediapipe as mp
 import numpy as np
 import librosa
@@ -138,7 +139,7 @@ def plot_report(tags, score):
         plt.grid(True, alpha=0.3)
         plt.legend()
         
-        label = 'DEEPFAKE' if score > 0.5 else 'HUMAN'
+        label = 'DEEPFAKE' if score > 0.5 else 'HUMAN'  # Native: 0=human, 1=deepfake
         plt.suptitle(f"Final Score: {score:.4f} - {label}", fontsize=14)
         plt.tight_layout(rect=[0, 0.03, 1, 0.95])
         plt.show()
@@ -217,14 +218,14 @@ def run_webcam():
     plt.figure(figsize=(10, 7))
     plt.subplot(2,1,1)
     plt.plot(tags['v_dist'], label='Inner Mouth Opening', color='blue')
-    plt.title(f"Forensic Lip-Sync v1.2 | Lag: {tags['lag_ms']:.2f}ms")
+    plt.title(f"Forensic Lip-Sync v1.7 | Lag: {tags['lag_ms']:.2f}ms")
     plt.legend()
     plt.subplot(2,1,2)
     plt.plot(tags['audio_amp'], label='Audio RMS Energy', color='red')
     plt.legend()
     plt.suptitle(f"Final Score: {score:.4f} - {'DEEPFAKE' if score > 0.5 else 'HUMAN'}")
     plt.tight_layout()
-    # plt.show() # Headless
+    plt.show()
 
 
 def run_file_upload(video_path=None):
