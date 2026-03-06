@@ -27,8 +27,44 @@ def analyze(frames, audio_data, sr=22050, fps=30.0):
     - Absolute Threshold: >= 0.1020 is Human | < 0.1020 is Deepfake.
     """
     frame_count = len(frames)
-    if frame_count == 0 or audio_data is None:
+    if frame_count == 0:
         return 0.5, {}
+
+    # ── AUDIO-LESS FALLBACK: Visual Rhythm Analysis ───────────────────────────
+    # When no audio (webcam mode), analyze lip-movement autocorrelation.
+    # Real speech has quasi-periodic rhythm (~2-5 syllables/s). Deepfakes are
+    # often monotonous (no rhythm) or erratic (no periodicity).
+    if audio_data is None:
+        mp_face_mesh = mp.solutions.face_mesh
+        v_dists = []
+        with mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1) as face_mesh:
+            for i in range(0, frame_count, 3):
+                res = face_mesh.process(cv2.cvtColor(frames[i], cv2.COLOR_BGR2RGB))
+                if res.multi_face_landmarks:
+                    l = res.multi_face_landmarks[0].landmark
+                    v = np.sqrt((l[13].x-l[14].x)**2 + (l[13].y-l[14].y)**2)
+                    scale = np.sqrt((l[10].x-l[152].x)**2 + (l[10].y-l[152].y)**2)
+                    v_dists.append(v / (scale + 1e-6))
+                else:
+                    v_dists.append(v_dists[-1] if v_dists else 0.0)
+        if len(v_dists) < 6:
+            return 0.5, {}
+        sig = np.array(v_dists) - np.mean(v_dists)
+        # Autocorrelation of lip signal — real speech has clear periodic peaks
+        ac = np.correlate(sig, sig, mode='full')[len(sig)-1:]
+        ac /= (ac[0] + 1e-6)
+        # Look for a peak in the 0.2-0.6s speech rhythm range
+        fps_decimated = (fps or 30.0) / 3
+        lag_lo, lag_hi = int(0.2 * fps_decimated), int(0.6 * fps_decimated)
+        lag_lo, lag_hi = max(1, lag_lo), min(lag_hi, len(ac)-1)
+        rhythm_strength = float(np.max(ac[lag_lo:lag_hi])) if lag_hi > lag_lo else 0.0
+        # High rhythm_strength → organic speech → low suspicion
+        # sigmoid: rhythm=0.3 → ~0.5, rhythm=0.6 → ~0.12, rhythm=0.0 → ~0.9
+        visual_suspicion = 1.0 / (1.0 + np.exp(15 * (rhythm_strength - 0.3)))
+        score = float(np.clip(visual_suspicion, 0.0, 1.0))
+        tags = {"score": score, "rhythm_strength": rhythm_strength,
+                "mode": "visual_rhythm", "v_dist": v_dists, "audio_amp": []}
+        return score, tags
 
     # Estimate FPS (heuristic if not provided)
     if fps is None: fps = 30.0 # Standard fallback
@@ -71,8 +107,8 @@ def analyze(frames, audio_data, sr=22050, fps=30.0):
     if len(pitch_series) < vis_count:
         pitch_series = np.pad(pitch_series, (0, vis_count - len(pitch_series)), 'edge')
 
-    # Vocal Gating (Focus on active speech)
-    vocal_gate = audio_rms > (np.max(audio_rms) * 0.1)
+    # Vocal Gating — 25% of peak RMS (tighter: removes background noise)
+    vocal_gate = audio_rms > (np.max(audio_rms) * 0.25)
     
     # 3. Cross-Correlation & Lag Analysis
     def norm(sig):
@@ -110,9 +146,9 @@ def analyze(frames, audio_data, sr=22050, fps=30.0):
     else:
         corr_h = 0.0
 
-    # 4. Forensic Scoring v1.7
-    score = 0.0 if max_corr >= 0.1020 else 1.0
-
+    # Continuous sigmoid score — replaces fragile binary 0.1020 threshold
+    # corr=0.05 → ~0.97 (fake), corr=0.12 → 0.50 (ambiguous), corr=0.25 → ~0.03 (human)
+    score = 1.0 / (1.0 + np.exp(40.0 * (max_corr - 0.12)))
     final_score = float(np.clip(score, 0.0, 1.0))
     tags = {
         "score": final_score,

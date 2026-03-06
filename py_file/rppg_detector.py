@@ -37,7 +37,7 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0, env_flags=Non
             if len(nose_movements) > 5:
                 var = np.var([m[0] for m in nose_movements]) + np.var([m[1] for m in nose_movements])
                 if var > 0.0012: env["shaky"] = True # Tightened (0.0004 -> 0.0012)
-    if not frames or frame_count < 75: # Lowered for v13.1 Decimation support
+    if not frames or frame_count < 20:  # Lowered: 20 frames = ~3s min at 6fps
         return (0.5, {}) if return_signals else 0.5
     
     if source == "auto":
@@ -52,8 +52,8 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0, env_flags=Non
     
     roi_means = {name: [] for name in ROIS}
     
-    # v18.0 - Headless Optimized Extraction (Stride=3)
     bg_means = []
+    nose_y_first_pass = []  # Capture nose during ROI pass — avoids second FaceMesh open
     stride_extraction = 3
     
     with mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1) as face_mesh:
@@ -71,9 +71,11 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0, env_flags=Non
             results = face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             if not results.multi_face_landmarks:
                 for name in ROIS: roi_means[name].append([np.nan, np.nan, np.nan])
+                nose_y_first_pass.append(0)
                 continue
             
             landmarks = results.multi_face_landmarks[0].landmark
+            nose_y_first_pass.append(landmarks[1].y)  # Nose-tip Y reused below
             for name, indices in ROIS.items():
                 points = np.array([(int(landmarks[idx].x * w), int(landmarks[idx].y * h)) for idx in indices])
                 poly_mask = np.zeros((h, w), dtype=np.uint8)
@@ -97,10 +99,21 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0, env_flags=Non
         R, G, B = arr[:, 0], arr[:, 1], arr[:, 2]
         Rn, Gn, Bn = R/(np.mean(R)+1e-6), G/(np.mean(G)+1e-6), B/(np.mean(B)+1e-6)
         
-        # v17.0 CHROM Extraction (Ambient Light Resilience)
-        # Projection: S = 3R - 2G
-        bvp_chrom = 3*Rn - 2*Gn
+        # Full CHROM Algorithm — de Haan & Jeanne (2013)
+        # Two orthogonal projections; std ratio cancels motion-correlated specular noise
+        X = 3*Rn - 2*Gn                       # Hue-plane component
+        Y = 1.5*Rn + Gn - 1.5*Bn             # Luminance-orthogonal component
+        std_x, std_y = np.std(X), np.std(Y)
+        alpha = (std_x / (std_y + 1e-8))       # Noise-cancellation ratio
+        bvp_chrom = X - alpha * Y              # Motion-noise cancelled BVP
         filtered_bvp = filtfilt(b, a, bvp_chrom)
+        
+        # Signal quality: SNR at peak vs band mean
+        yf_roi = np.abs(rfft(filtered_bvp))
+        xf_roi = rfftfreq(len(filtered_bvp), 1/fs)
+        band_mask_roi = (xf_roi >= 0.75) & (xf_roi <= 2.5)
+        roi_snr = (np.max(yf_roi[band_mask_roi]) / (np.mean(yf_roi[band_mask_roi]) + 1e-6)) \
+                  if np.any(band_mask_roi) else 1.0
         
         # Red-Dominance Check (Light Quality)
         rg_ratio = np.mean(R) / (np.mean(G) + 1e-6)
@@ -114,9 +127,9 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0, env_flags=Non
         gr_var_ratio = np.var(gf) / (np.var(rf) + 1e-8)
         
         roi_data[name] = {
-            "bvp": filtered_bvp, "gr_var": gr_var_ratio, 
+            "bvp": filtered_bvp, "gr_var": gr_var_ratio,
             "lockstep": lockstep_corr, "rg_ratio": rg_ratio,
-            "red_dominant": is_red_dominant
+            "red_dominant": is_red_dominant, "snr": roi_snr
         }
 
     # Windowed Phase Stability Check (Adaptive Window)
@@ -172,26 +185,18 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0, env_flags=Non
     noise_uniformity = abs(face_var_avg - bg_var_global) / (bg_var_global + 1e-6)
     is_organic_grain = noise_uniformity < 0.4 and bg_var_global > 0.5
     
-    # v17.0 - Background-Anchor Motion Correlation
-    # Track nose-tip vs background signal patterns
-    nose_y = []
-    mp_face = mp.solutions.face_mesh
-    with mp_face.FaceMesh(static_image_mode=False) as mesh:
-        for fr in frames[::stride]:
-            res = mesh.process(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB))
-            nose_y.append(res.multi_face_landmarks[0].landmark[1].y if res.multi_face_landmarks else 0)
-    
+    # Use nose_y from first extraction pass (no second FaceMesh needed)
+    nose_y = nose_y_first_pass
     anchor_correlation = 0.0
     if len(nose_y) > 2 and len(bg_means) > 2:
-        # Interpolate background means to match nose tracking density if needed
-        bg_intensity = np.mean(bg_arr, axis=1) # Global brightness anchor
-        # Normalize for correlation
+        bg_intensity = np.mean(bg_arr, axis=1)
         n_y = np.array(nose_y)
         bg_i = np.interp(np.linspace(0, 1, len(n_y)), np.linspace(0, 1, len(bg_intensity)), bg_intensity)
-        anchor_correlation = np.abs(np.corrcoef(n_y, bg_i)[0, 1])
+        if np.std(n_y) > 1e-7 and np.std(bg_i) > 1e-7:
+            anchor_correlation = float(np.abs(np.corrcoef(n_y, bg_i)[0, 1]))
     
     # Global Motion (Handheld detection)
-    is_handheld = bg_var_global > 1.2 or anchor_correlation > 0.85 # Anchor-aware
+    is_handheld = bg_var_global > 1.2 or anchor_correlation > 0.85
     
     # Red-Dominance (Light quality signal)
     avg_rg_ratio = np.mean([v["rg_ratio"] for v in roi_data.values()])
