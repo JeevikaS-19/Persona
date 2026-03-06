@@ -84,8 +84,13 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0, env_flags=Non
                 roi_means[name].append([m[2], m[1], m[0]]) # RGB
 
     fs = float(fps)
-    b, a = butter(4, [0.75 / (0.5 * fs), 2.5 / (0.5 * fs)], btype='band')
+    # Adaptive filter order: filtfilt needs signal > 3*(2*order+1) samples.
+    # At 6fps/stride-3, BVP is ~10 points — order 2 gives padlen=15, order 4 gives 27.
+    estimated_bvp_len = frame_count // stride_extraction
+    filt_order = 2 if estimated_bvp_len < 30 else 4
+    b, a = butter(filt_order, [0.75 / (0.5 * fs), 2.5 / (0.5 * fs)], btype='band')
     roi_data = {}
+
     
     for name, data in roi_means.items():
         arr = np.array(data)

@@ -271,6 +271,13 @@ async def analyze_video_production(video_path, source_type="upload", progress_ca
             # Suspicion threshold: >= 0.65 → DEEPFAKE
             classification = "DEEPFAKE" if ensemble_score >= 0.65 else "HUMAN"
             
+            # Majority-vote override: if >2 of 4 pillars are >= 0.5, force DEEPFAKE
+            all_scores = [rppg_score, sync_score, biometric_score, reflection_score]
+            suspicious_count = sum(1 for s in all_scores if s >= 0.5)
+            if suspicious_count > 2:
+                classification = "DEEPFAKE"
+
+            
             return {
                 "status": "completed",
                 "filename": filename,
