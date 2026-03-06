@@ -178,15 +178,15 @@ async def analyze_video_production(video_path, source_type="upload", progress_ca
             while len(raw_frames) < 150: # Cap at ~15s max even if trim failed
                 ret, frame = cap.read()
                 if not ret: break
-                raw_frames.append(cv2.resize(frame, (640, 480)))
+                raw_frames.append(cv2.resize(frame, (320, 240)))  # Smaller = faster MediaPipe inference
             cap.release()
 
             if not raw_frames:
                 return {"status": "error", "message": "Empty stream"}
 
             # Step 3: Optimization Stack
-            frames = resample_to_fps(raw_frames, orig_fps, target_fps=6)
-            fs = 6.0
+            frames = resample_to_fps(raw_frames, orig_fps, target_fps=15)
+            fs = 15.0
             duration = len(frames) / fs
             
             # Fast-ROI
@@ -209,16 +209,41 @@ async def analyze_video_production(video_path, source_type="upload", progress_ca
                 x, y, w_roi, h_roi = face_roi
                 frames = [f[y:y+h_roi, x:x+w_roi] for f in frames]
 
-            # Step 4: Independent Specialists (Fault Tolerance)
+            # Step 4: Pre-extract ALL landmarks in a SINGLE FaceMesh pass
+            # This eliminates 3 redundant model loads (one per specialist).
+            def _preextract_landmarks(frames_list):
+                """Returns list[np.ndarray(478,3) | None] — one entry per frame."""
+                mp_face = mp.solutions.face_mesh
+                lm_results = []
+                with mp_face.FaceMesh(refine_landmarks=True, static_image_mode=False,
+                                      max_num_faces=1) as mesh:
+                    for fr in frames_list:
+                        if fr is None:
+                            lm_results.append(None)
+                            continue
+                        res = mesh.process(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB))
+                        if res.multi_face_landmarks:
+                            lms = res.multi_face_landmarks[0].landmark
+                            lm_results.append(
+                                np.array([[l.x, l.y, l.z] for l in lms], dtype=np.float32)
+                            )  # shape (478, 3)
+                        else:
+                            lm_results.append(None)
+                return lm_results
+
+            lm_data = await asyncio.to_thread(_preextract_landmarks, frames)
+
+            # Step 5: Independent Specialists — share pre-computed landmarks
             rppg_score, rppg_tags = 0.5, {}
             sync_score, sync_tags = 0.5, {}
-            spatial_score = 0.5
             env = {}
 
             # Specialist A: rPPG
             try:
                 env = EnvironmentalAnalyzer.analyze_environment(raw_frames)
-                rppg_data = await asyncio.to_thread(analyze_rppg, frames, return_signals=True, fps=fs, env_flags=env)
+                rppg_data = await asyncio.to_thread(
+                    analyze_rppg, frames, return_signals=True, fps=fs,
+                    env_flags=env, precomputed_landmarks=lm_data)
                 rppg_score, rppg_tags = rppg_data if isinstance(rppg_data, tuple) else (rppg_data, {})
             except Exception as e:
                 logger.error(f"rPPG Specialist Failure: {e}")
@@ -229,7 +254,14 @@ async def analyze_video_production(video_path, source_type="upload", progress_ca
                 import librosa
                 audio, sr = librosa.load(video_path, sr=22050, duration=5)
                 if audio.size > 0 and np.max(np.abs(audio)) > 0.005:
-                    sync_data = await asyncio.to_thread(analyze_sync, frames, audio, sr=sr, fps=fs)
+                    sync_data = await asyncio.to_thread(
+                        analyze_sync, frames, audio, sr=sr, fps=fs,
+                        precomputed_landmarks=lm_data)
+                    sync_score, sync_tags = sync_data if isinstance(sync_data, tuple) else (sync_data, {})
+                else:
+                    sync_data = await asyncio.to_thread(
+                        analyze_sync, frames, None, sr=22050, fps=fs,
+                        precomputed_landmarks=lm_data)
                     sync_score, sync_tags = sync_data if isinstance(sync_data, tuple) else (sync_data, {})
             except Exception as e:
                 logger.debug(f"Sync Specialist: no usable audio ({e or 'silent/no audio track'})")
@@ -238,7 +270,9 @@ async def analyze_video_production(video_path, source_type="upload", progress_ca
             # Specialist C: Biometric (Saccade)
             biometric_score, biometric_tags = 0.5, {}
             try:
-                biometric_data = await asyncio.to_thread(analyze_biometric, frames, fps=fs, return_signals=True)
+                biometric_data = await asyncio.to_thread(
+                    analyze_biometric, frames, fps=fs, return_signals=True,
+                    precomputed_landmarks=lm_data)
                 biometric_score, biometric_tags = biometric_data if isinstance(biometric_data, tuple) else (biometric_data, {})
             except Exception as e:
                 logger.error(f"Biometric Specialist Failure: {e}")
@@ -247,7 +281,9 @@ async def analyze_video_production(video_path, source_type="upload", progress_ca
             # Specialist D: Reflection
             reflection_score, reflection_tags = 0.5, {}
             try:
-                reflection_data = await asyncio.to_thread(analyze_reflection, frames, fps=fs, return_signals=True)
+                reflection_data = await asyncio.to_thread(
+                    analyze_reflection, frames, fps=fs, return_signals=True,
+                    precomputed_landmarks=lm_data)
                 reflection_score, reflection_tags = reflection_data if isinstance(reflection_data, tuple) else (reflection_data, {})
             except Exception as e:
                 logger.error(f"Reflection Specialist Failure: {e}")

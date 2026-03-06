@@ -20,7 +20,7 @@ def bandpass_filter(data, lowcut, highcut, fs, order=5):
     b, a = butter_bandpass(lowcut, highcut, fs, order=order)
     return lfilter(b, a, data)
 
-def analyze(frames, audio_data, sr=22050, fps=30.0):
+def analyze(frames, audio_data, sr=22050, fps=30.0, precomputed_landmarks=None):
     """
     Lip-Sync Logic v1.7 - Forensic Precision.
     - Articulatory Lag: Detects if mouth leads audio (Human) or follows (Deepfake).
@@ -69,27 +69,40 @@ def analyze(frames, audio_data, sr=22050, fps=30.0):
     # Estimate FPS (heuristic if not provided)
     if fps is None: fps = 30.0 # Standard fallback
     
-    # 1. Visual Feature Extraction (Headless Stride=3)
-    mp_face_mesh = mp.solutions.face_mesh
-    stride_extraction = 3
+    # 1. Visual Feature Extraction
+    stride_extraction = 1 if precomputed_landmarks is not None else 3
     
     v_distances = [] 
     h_distances = [] 
     
-    with mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1) as face_mesh:
+    if precomputed_landmarks is not None:
         for i in range(0, frame_count, stride_extraction):
-            frame = frames[i]
-            results = face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            if results.multi_face_landmarks:
-                l = results.multi_face_landmarks[0].landmark
-                v_dist = np.sqrt((l[13].x - l[14].x)**2 + (l[13].y - l[14].y)**2)
-                h_dist = np.sqrt((l[78].x - l[308].x)**2 + (l[78].y - l[308].y)**2)
-                scale = np.sqrt((l[10].x - l[152].x)**2 + (l[10].y - l[152].y)**2)
+            lms = precomputed_landmarks[i] if i < len(precomputed_landmarks) else None
+            if lms is not None:
+                v_dist = np.sqrt((lms[13, 0] - lms[14, 0])**2 + (lms[13, 1] - lms[14, 1])**2)
+                h_dist = np.sqrt((lms[78, 0] - lms[308, 0])**2 + (lms[78, 1] - lms[308, 1])**2)
+                scale = np.sqrt((lms[10, 0] - lms[152, 0])**2 + (lms[10, 1] - lms[152, 1])**2)
                 v_distances.append(v_dist / (scale + 1e-6))
                 h_distances.append(h_dist / (scale + 1e-6))
             else:
                 v_distances.append(v_distances[-1] if v_distances else 0.0)
                 h_distances.append(h_distances[-1] if h_distances else 0.0)
+    else:
+        mp_face_mesh = mp.solutions.face_mesh
+        with mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1) as face_mesh:
+            for i in range(0, frame_count, stride_extraction):
+                frame = frames[i]
+                results = face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                if results.multi_face_landmarks:
+                    l = results.multi_face_landmarks[0].landmark
+                    v_dist = np.sqrt((l[13].x - l[14].x)**2 + (l[13].y - l[14].y)**2)
+                    h_dist = np.sqrt((l[78].x - l[308].x)**2 + (l[78].y - l[308].y)**2)
+                    scale = np.sqrt((l[10].x - l[152].x)**2 + (l[10].y - l[152].y)**2)
+                    v_distances.append(v_dist / (scale + 1e-6))
+                    h_distances.append(h_dist / (scale + 1e-6))
+                else:
+                    v_distances.append(v_distances[-1] if v_distances else 0.0)
+                    h_distances.append(h_distances[-1] if h_distances else 0.0)
 
     # 2. Audio Feature Extraction (RMS + Pitch)
     # Re-normalize audio to match decimated visual stream

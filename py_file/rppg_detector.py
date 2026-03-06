@@ -15,7 +15,7 @@ def interpolate_peak(y, x, idx):
     p = 0.5 * (y0 - y2) / denom
     return x[idx] + p * (x[1] - x[0])
 
-def analyze(frames, return_signals=False, source="auto", fps=30.0, env_flags=None, callback=None):
+def analyze(frames, return_signals=False, source="auto", fps=30.0, env_flags=None, callback=None, precomputed_landmarks=None):
     """
     Forensic rPPG Analysis v14.7 - Shaky Cam Hardening.
     - Environmental Calibration: Aggressive relaxation for extreme handheld motion.
@@ -56,7 +56,8 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0, env_flags=Non
     nose_y_first_pass = []  # Capture nose during ROI pass — avoids second FaceMesh open
     stride_extraction = 3
     
-    with mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1) as face_mesh:
+    if precomputed_landmarks is not None:
+        stride_extraction = 1
         for i in range(0, frame_count, stride_extraction):
             frame = frames[i]
             if frame is None: continue
@@ -68,27 +69,60 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0, env_flags=Non
             bg_avg = (cv2.mean(bg_left)[:3] + cv2.mean(bg_right)[:3])
             bg_means.append([bg_avg[2]/2, bg_avg[1]/2, bg_avg[0]/2]) # RGB
             
-            results = face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            if not results.multi_face_landmarks:
+            lms = precomputed_landmarks[i] if i < len(precomputed_landmarks) else None
+            if lms is None:
                 for name in ROIS: roi_means[name].append([np.nan, np.nan, np.nan])
                 nose_y_first_pass.append(0)
                 continue
             
-            landmarks = results.multi_face_landmarks[0].landmark
-            nose_y_first_pass.append(landmarks[1].y)  # Nose-tip Y reused below
+            nose_y_first_pass.append(lms[1, 1])  # Nose-tip Y reused below
             for name, indices in ROIS.items():
-                points = np.array([(int(landmarks[idx].x * w), int(landmarks[idx].y * h)) for idx in indices])
+                points = np.array([(int(lms[idx, 0] * w), int(lms[idx, 1] * h)) for idx in indices])
                 poly_mask = np.zeros((h, w), dtype=np.uint8)
                 cv2.fillConvexPoly(poly_mask, points, 255)
                 m = cv2.mean(frame, mask=poly_mask)[:3]
                 roi_means[name].append([m[2], m[1], m[0]]) # RGB
+    else:
+        with mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1) as face_mesh:
+            for i in range(0, frame_count, stride_extraction):
+                frame = frames[i]
+                if frame is None: continue
+                h, w, _ = frame.shape
+                
+                # 1. Global Background Sample (Corners)
+                bg_left = frame[10:60, 10:60]
+                bg_right = frame[10:60, w-60:w-10]
+                bg_avg = (cv2.mean(bg_left)[:3] + cv2.mean(bg_right)[:3])
+                bg_means.append([bg_avg[2]/2, bg_avg[1]/2, bg_avg[0]/2]) # RGB
+                
+                results = face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                if not results.multi_face_landmarks:
+                    for name in ROIS: roi_means[name].append([np.nan, np.nan, np.nan])
+                    nose_y_first_pass.append(0)
+                    continue
+                
+                landmarks = results.multi_face_landmarks[0].landmark
+                nose_y_first_pass.append(landmarks[1].y)  # Nose-tip Y reused below
+                for name, indices in ROIS.items():
+                    points = np.array([(int(landmarks[idx].x * w), int(landmarks[idx].y * h)) for idx in indices])
+                    poly_mask = np.zeros((h, w), dtype=np.uint8)
+                    cv2.fillConvexPoly(poly_mask, points, 255)
+                    m = cv2.mean(frame, mask=poly_mask)[:3]
+                    roi_means[name].append([m[2], m[1], m[0]]) # RGB
 
-    fs = float(fps)
+    fs = float(fps) / stride_extraction
+    nyq = 0.5 * fs
+    lowcut = min(0.75, nyq * 0.9)
+    highcut = min(2.5, nyq * 0.95)
+    
     # Adaptive filter order: filtfilt needs signal > 3*(2*order+1) samples.
     # At 6fps/stride-3, BVP is ~10 points — order 2 gives padlen=15, order 4 gives 27.
     estimated_bvp_len = frame_count // stride_extraction
     filt_order = 2 if estimated_bvp_len < 30 else 4
-    b, a = butter(filt_order, [0.75 / (0.5 * fs), 2.5 / (0.5 * fs)], btype='band')
+    if lowcut < highcut:
+        b, a = butter(filt_order, [lowcut / nyq, highcut / nyq], btype='band')
+    else:
+        b, a = butter(1, 0.99, btype='low')
     roi_data = {}
 
     
@@ -403,7 +437,7 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0, env_flags=Non
         "entropy": spectral_entropy, "roi_var": roi_variance, "fps": fs,
         "rg_ratio": avg_rg_ratio, "anchor_corr": anchor_correlation
     }
-    return final_score, tags if return_signals else final_score
+    return (final_score, tags) if return_signals else final_score
 
 def plot_report(signals, score):
     if not signals: return

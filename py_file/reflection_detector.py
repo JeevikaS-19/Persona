@@ -100,7 +100,7 @@ def extract_glint_physics(eye_crop, is_blinking):
 
     return gx, gy, max_val, morphology_score
 
-def analyze(frames, fps=30.0, return_signals=False):
+def analyze(frames, fps=30.0, return_signals=False, precomputed_landmarks=None):
     """
     Reflection Forensic Specialist v3.0 - The Humanity Checklist.
     1. Geometric Consistency (Parallax)
@@ -122,16 +122,28 @@ def analyze(frames, fps=30.0, return_signals=False):
     morphology_scores = []
     micro_jitters = []
 
-    with mp_face_mesh.FaceMesh(refine_landmarks=True, max_num_faces=1) as face_mesh:
-        for idx, frame in enumerate(frames):
-            if idx % 2 != 0: continue  # stride=2, process every other frame
-            if frame is None: continue
+    def get_meshes():
+        if precomputed_landmarks is not None:
+            class _DL: __slots__=['x','y','z']
+            class _DM:
+                def __init__(self, a): self.a = a
+                def __getitem__(self, j):
+                    d = _DL(); d.x, d.y, d.z = self.a[j,0], self.a[j,1], self.a[j,2]; return d
+            for i, f in enumerate(frames):
+                if i % 2 != 0 or f is None: continue
+                yield i, f, _DM(precomputed_landmarks[i]) if (i < len(precomputed_landmarks) and precomputed_landmarks[i] is not None) else None
+        else:
+            with mp_face_mesh.FaceMesh(refine_landmarks=True, max_num_faces=1) as face_mesh:
+                for i, f in enumerate(frames):
+                    if i % 2 != 0 or f is None: continue
+                    res = face_mesh.process(cv2.cvtColor(f, cv2.COLOR_BGR2RGB))
+                    yield i, f, res.multi_face_landmarks[0].landmark if res.multi_face_landmarks else None
+
+    if True:
+        for idx, frame, mesh in get_meshes():
             h, w, _ = frame.shape
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = face_mesh.process(rgb)
             
-            if results.multi_face_landmarks:
-                mesh = results.multi_face_landmarks[0].landmark
+            if mesh is not None:
                 
                 # 1. Temporal Dynamics: Blink Occlusion Check
                 ear_l = get_ear(mesh, LEFT_EYE, w, h)

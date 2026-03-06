@@ -21,7 +21,7 @@ def get_micro_jitter(history):
 
 import random as _random
 
-def analyze(frames, fps=30.0, return_signals=False):
+def analyze(frames, fps=30.0, return_signals=False, precomputed_landmarks=None):
     """
     Biometric Saccade Analysis v4.0 - Physics-Calibrated.
 
@@ -46,20 +46,31 @@ def analyze(frames, fps=30.0, return_signals=False):
     right_coords = []
     iid_values   = []  # Inter-Ocular Distance per frame (for normalization)
 
-    with mp_face_mesh.FaceMesh(refine_landmarks=True, max_num_faces=1) as face_mesh:
+    if precomputed_landmarks is not None:
         for idx in sample_indices:
-            frame = frames[idx]
-            if frame is None: continue
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = face_mesh.process(rgb)
-            if results.multi_face_landmarks:
-                lm = results.multi_face_landmarks[0].landmark
-                pl = lm[PUPIL_LEFT]
-                pr = lm[PUPIL_RIGHT]
-                left_coords.append((pl.x, pl.y))
-                right_coords.append((pr.x, pr.y))
-                iid = np.sqrt((pl.x - pr.x)**2 + (pl.y - pr.y)**2)
+            if idx < len(precomputed_landmarks) and precomputed_landmarks[idx] is not None:
+                lm = precomputed_landmarks[idx]
+                pl_x, pl_y = lm[PUPIL_LEFT, 0], lm[PUPIL_LEFT, 1]
+                pr_x, pr_y = lm[PUPIL_RIGHT, 0], lm[PUPIL_RIGHT, 1]
+                left_coords.append((pl_x, pl_y))
+                right_coords.append((pr_x, pr_y))
+                iid = np.sqrt((pl_x - pr_x)**2 + (pl_y - pr_y)**2)
                 iid_values.append(iid)
+    else:
+        with mp_face_mesh.FaceMesh(refine_landmarks=True, max_num_faces=1) as face_mesh:
+            for idx in sample_indices:
+                frame = frames[idx]
+                if frame is None: continue
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                results = face_mesh.process(rgb)
+                if results.multi_face_landmarks:
+                    lm = results.multi_face_landmarks[0].landmark
+                    pl = lm[PUPIL_LEFT]
+                    pr = lm[PUPIL_RIGHT]
+                    left_coords.append((pl.x, pl.y))
+                    right_coords.append((pr.x, pr.y))
+                    iid = np.sqrt((pl.x - pr.x)**2 + (pl.y - pr.y)**2)
+                    iid_values.append(iid)
 
     if len(left_coords) < 5:
         return (0.5, {}) if return_signals else 0.5
