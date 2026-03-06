@@ -185,8 +185,8 @@ async def analyze_video_production(video_path, source_type="upload", progress_ca
                 return {"status": "error", "message": "Empty stream"}
 
             # Step 3: Optimization Stack
-            frames = resample_to_fps(raw_frames, orig_fps, target_fps=10)
-            fs = 10.0
+            frames = resample_to_fps(raw_frames, orig_fps, target_fps=6)
+            fs = 6.0
             duration = len(frames) / fs
             
             # Fast-ROI

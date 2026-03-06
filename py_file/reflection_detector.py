@@ -124,6 +124,7 @@ def analyze(frames, fps=30.0, return_signals=False):
 
     with mp_face_mesh.FaceMesh(refine_landmarks=True, max_num_faces=1) as face_mesh:
         for idx, frame in enumerate(frames):
+            if idx % 2 != 0: continue  # stride=2, process every other frame
             if frame is None: continue
             h, w, _ = frame.shape
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -241,45 +242,107 @@ def analyze(frames, fps=30.0, return_signals=False):
 import matplotlib.pyplot as plt
 
 def plot_report(tags, score):
-    """Display a graphical forensic report for the Optical Physics Engine."""
+    """Premium 3-panel forensic report for the Optical Physics Engine."""
     try:
-        label = 'DEEPFAKE' if score >= 0.5 else 'HUMAN'  # 0=human, 1=deepfake
-        color = 'red' if label == 'DEEPFAKE' else 'green'
-        
-        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-        fig.patch.set_facecolor('#1c1c1c')
-        for ax in axes:
-            ax.set_facecolor('#2a2a2a')
-        
-        # Left plot: Pillar Scores (show authenticity for readability, invert for display)
-        pillars = ['Morphology\n(Gaussian R²)', 'Parallax\nProof', 'Blink\nIntegrity']
-        parallax_score = 1.0 if tags.get('parallax_fails', 0) == 0 else max(0, 1 - tags['parallax_fails'] / 10)
-        blink_score = 1.0 if tags.get('blink_persistence', 0) == 0 else 0.0
-        values = [tags.get('morphology_r2', 0), parallax_score, blink_score]
-        bar_colors = ['green' if v > 0.5 else 'red' for v in values]
-        bars = axes[0].bar(pillars, values, color=bar_colors, edgecolor='white', linewidth=0.5)
-        axes[0].set_ylim(0, 1.2)
-        axes[0].set_ylabel('Physics Score (1=pass)', color='white')
-        axes[0].set_title('Physics Pillar Breakdown', color='white', fontsize=12, fontweight='bold')
-        axes[0].tick_params(colors='white')
-        axes[0].axhline(y=0.5, color='yellow', linestyle='--', linewidth=1, label='Pass Threshold')
-        for bar, val in zip(bars, values):
-            axes[0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
-                         f'{val:.2f}', ha='center', va='bottom', color='white', fontsize=10)
-        axes[0].legend(facecolor='#333')
-        
-        # Right plot: Suspicion gauge (score=0 human, score=1 deepfake)
-        gauge_data = [1 - score, score]  # human portion first
-        wedge_colors = ['#2ecc71', color]
-        axes[1].pie(gauge_data, colors=wedge_colors, startangle=90,
-                    wedgeprops={'width': 0.4, 'edgecolor': '#1c1c1c', 'linewidth': 2})
-        axes[1].text(0, 0, f'{score:.2%}', ha='center', va='center',
-                     fontsize=22, fontweight='bold', color=color)
-        axes[1].set_title('Suspicion Score (0=Human, 1=Fake)', color='white', fontsize=12, fontweight='bold')
-        
-        fig.suptitle(f'Optical Physics Forensic [v3.0]  —  Verdict: {label}',
-                     fontsize=14, fontweight='bold', color=color, y=1.01)
-        plt.tight_layout()
+        DARK_BG   = '#0f0f14'
+        PANEL_BG  = '#16161f'
+        BORDER    = '#2a2a3a'
+        TEXT_DIM  = '#8888aa'
+        TEXT_MAIN = '#e0e0f0'
+
+        label   = 'DEEPFAKE' if score >= 0.5 else 'HUMAN'
+        v_color = '#e74c3c' if label == 'DEEPFAKE' else '#2ecc71'
+
+        # Compute pillar PASS scores (higher = passed the physics check)
+        parallax_pass = 1.0 if tags.get('parallax_fails', 0) == 0 \
+                        else max(0.0, 1.0 - tags['parallax_fails'] / 10.0)
+        blink_pass    = 1.0 if tags.get('blink_persistence', 0) == 0 else 0.0
+        morph_pass    = float(tags.get('morphology_r2', 0.0))
+
+        pillar_names   = ['Morphology\n(Gaussian R²)', 'Parallax\nConsistency', 'Blink\nPhysics']
+        pillar_vals    = [morph_pass, parallax_pass, blink_pass]
+        pillar_colors  = ['#2ecc71' if v > 0.5 else '#e74c3c' for v in pillar_vals]
+
+        fig = plt.figure(figsize=(14, 5), facecolor=DARK_BG)
+        fig.patch.set_facecolor(DARK_BG)
+
+        # ── Grid: Left (bar chart) | Centre (ring) | Right (stats table)
+        gs = fig.add_gridspec(1, 3, width_ratios=[2, 1.4, 1.2],
+                              left=0.06, right=0.97, top=0.83, bottom=0.13, wspace=0.35)
+        ax_bars  = fig.add_subplot(gs[0])
+        ax_ring  = fig.add_subplot(gs[1])
+        ax_stats = fig.add_subplot(gs[2])
+
+        # ── Header banner ──────────────────────────────────────────────────
+        fig.text(0.5, 0.95, 'PERSONA · OPTICAL PHYSICS AUDIT',
+                 ha='center', va='top', fontsize=11, color=TEXT_DIM,
+                 fontfamily='monospace', fontweight='bold', letterSpacing=4)  # type: ignore
+        fig.text(0.5, 0.90, f'Verdict  ·  {label}',
+                 ha='center', va='top', fontsize=18, color=v_color, fontweight='bold')
+
+        # ── Panel 1: Horizontal bar chart of pillars ───────────────────────
+        ax_bars.set_facecolor(PANEL_BG)
+        ax_bars.spines[:].set_color(BORDER)
+        ax_bars.tick_params(colors=TEXT_DIM, labelsize=9)
+        ax_bars.xaxis.label.set_color(TEXT_DIM)
+
+        y_pos = range(len(pillar_names))
+        bars = ax_bars.barh(list(y_pos), pillar_vals, color=pillar_colors,
+                            height=0.5, edgecolor=DARK_BG, linewidth=1.5)
+        ax_bars.set_xlim(0, 1.15)
+        ax_bars.set_yticks(list(y_pos))
+        ax_bars.set_yticklabels(pillar_names, color=TEXT_MAIN, fontsize=9.5,
+                                fontfamily='monospace')
+        ax_bars.axvline(x=0.5, color='#f39c12', linewidth=1, linestyle='--', alpha=0.7)
+        ax_bars.set_xlabel('Pass Score  (>0.5 = physics intact)', color=TEXT_DIM, fontsize=8.5)
+        ax_bars.set_title('Physics Pillars', color=TEXT_MAIN, fontsize=10,
+                           fontweight='bold', pad=8)
+        ax_bars.set_facecolor(PANEL_BG)
+        ax_bars.grid(axis='x', color=BORDER, linewidth=0.5, alpha=0.5)
+        ax_bars.set_axisbelow(True)
+
+        for bar, val, pc in zip(bars, pillar_vals, pillar_colors):
+            ax_bars.text(val + 0.02, bar.get_y() + bar.get_height() / 2,
+                         f'{val:.2f}', va='center', color=pc,
+                         fontsize=10, fontweight='bold', fontfamily='monospace')
+
+        # ── Panel 2: Ring gauge ────────────────────────────────────────────
+        ax_ring.set_facecolor(PANEL_BG)
+        ax_ring.set_aspect('equal')
+        ax_ring.axis('off')
+        ax_ring.set_title('Suspicion', color=TEXT_MAIN, fontsize=10,
+                            fontweight='bold', pad=8)
+
+        ring_data   = [score, 1.0 - score]
+        ring_colors = [v_color, '#22222f']
+        wedges, _   = ax_ring.pie(ring_data, colors=ring_colors, startangle=90,
+                                   wedgeprops={'width': 0.38, 'edgecolor': DARK_BG,
+                                               'linewidth': 2.5})
+        ax_ring.text(0, 0.07, f'{score:.0%}', ha='center', va='center',
+                     fontsize=24, fontweight='bold', color=v_color, fontfamily='monospace')
+        ax_ring.text(0, -0.22, '0 = human   1 = fake',
+                     ha='center', va='center', fontsize=7, color=TEXT_DIM,
+                     fontfamily='monospace')
+
+        # ── Panel 3: Stats panel ───────────────────────────────────────────
+        ax_stats.set_facecolor(PANEL_BG)
+        ax_stats.axis('off')
+        ax_stats.set_title('Signal Details', color=TEXT_MAIN, fontsize=10,
+                             fontweight='bold', pad=8)
+
+        stats = [
+            ('Morphology R²', f"{morph_pass:.1%}"),
+            ('Parallax Fails', str(tags.get('parallax_fails', 0))),
+            ('Blink Fails',    str(tags.get('blink_persistence', 0))),
+        ]
+        for i, (k, v) in enumerate(stats):
+            y = 0.82 - i * 0.28
+            ax_stats.text(0.05, y,       k, transform=ax_stats.transAxes,
+                          color=TEXT_DIM, fontsize=9, fontfamily='monospace')
+            ax_stats.text(0.05, y - 0.10, v, transform=ax_stats.transAxes,
+                          color=TEXT_MAIN, fontsize=14, fontweight='bold',
+                          fontfamily='monospace')
+
         plt.show()
     except Exception as e:
         print(f'Plotting failed: {e}')

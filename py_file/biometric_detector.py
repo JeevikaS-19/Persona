@@ -38,7 +38,7 @@ def analyze(frames, fps=30.0, return_signals=False):
     mp_face_mesh = mp.solutions.face_mesh
 
     n_frames = len(frames)
-    sample_count = min(30, n_frames)
+    sample_count = min(15, n_frames)  # 15 random frames is sufficient for jitter signal
     sample_indices = sorted(_random.sample(range(n_frames), sample_count))
 
     # Track left and right pupils independently
