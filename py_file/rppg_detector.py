@@ -125,23 +125,29 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0, env_flags=Non
     stride = win_len // 5
     phase_lags = []
     bpms = []
-    for i in range(0, frame_count - win_len, stride):
+    bvp_len = len(roi_data["forehead"]["bvp"])
+    # Recompute win_len relative to decimated BVP length (stride_extraction=3)
+    win_len = min(win_len, bvp_len)
+    stride = max(1, win_len // 5)
+    for i in range(0, bvp_len - win_len, stride):
         # Phase of forehead vs mean cheeks
         f_win = roi_data["forehead"]["bvp"][i:i+win_len]
         c_win = (roi_data["cheek_r"]["bvp"][i:i+win_len] + roi_data["cheek_l"]["bvp"][i:i+win_len])/2
+        actual_len = len(f_win)
+        if actual_len < 10: continue  # Skip too-short slices
         
         f_fft = rfft(f_win)
         c_fft = rfft(c_win)
-        xf_w = rfftfreq(win_len, 1/fs)
+        xf_w = rfftfreq(actual_len, 1/fs)  # Match to actual slice, not win_len
         m_w = (xf_w >= 0.75) & (xf_w <= 2.5)
         
+        if not np.any(m_w): continue  # No valid band at this FPS/length combo
         peak_w_rel = np.argmax(np.abs(f_fft)[m_w])
         peak_w_abs = np.where(m_w)[0][peak_w_rel]
         bpms.append(interpolate_peak(np.abs(f_fft), xf_w, peak_w_abs) * 60)
         
         f_phase = np.angle(f_fft[peak_w_abs])
         c_phase = np.angle(c_fft[peak_w_abs])
-        # Stream BVP update removed to prioritize single-result JSON
         phase_lags.append(np.abs(f_phase - c_phase))
     
     phase_jitter = np.std(phase_lags) if len(phase_lags) > 1 else 0.0

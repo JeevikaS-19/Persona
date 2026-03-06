@@ -9,6 +9,12 @@ Usage (call ONCE before any detector imports):
     import mediapipe_compat  # noqa — registers shim
 """
 
+# Suppress TFLite / absl / glog C++ runtime noise BEFORE any mediapipe import
+import os
+os.environ.setdefault("GLOG_minloglevel", "3")        # suppress glog INFO/WARNING/ERROR
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")    # suppress TF C++ logs
+os.environ.setdefault("ABSL_MIN_LOG_LEVEL", "3")      # suppress absl logs
+
 import types
 import numpy as np
 import mediapipe as mp
@@ -75,7 +81,16 @@ class FaceMesh:
             output_face_blendshapes=False,
             output_facial_transformation_matrixes=False,
         )
-        self._landmarker = _mp_vision.FaceLandmarker.create_from_options(opts)
+        # Suppress C++ runtime warnings emitted during model load (xnnpack/TFLite/absl)
+        _devnull = open(os.devnull, 'w')
+        _old_stderr_fd = os.dup(2)
+        os.dup2(_devnull.fileno(), 2)
+        try:
+            self._landmarker = _mp_vision.FaceLandmarker.create_from_options(opts)
+        finally:
+            os.dup2(_old_stderr_fd, 2)
+            os.close(_old_stderr_fd)
+            _devnull.close()
         self._static = static_image_mode
         self._ts = 0   # monotonic timestamp (ms) for VIDEO mode
 
