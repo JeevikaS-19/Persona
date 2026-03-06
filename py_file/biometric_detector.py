@@ -23,22 +23,28 @@ import random as _random
 
 def analyze(frames, fps=30.0, return_signals=False):
     """
-    Biometric Saccade Analysis v3.0 - Random Frame Sampling.
-    Instead of a consecutive rolling window, we randomly sample frames
-    scattered across the video to compare pupil displacements.
-    Human eyes exhibit organic micro-jitter even between widely spaced frames,
-    while deepfake pupils tend to sit locked or move too linearly.
+    Biometric Saccade Analysis v4.0 - Physics-Calibrated.
+
+    Three pillars:
+      1. IID Normalization: jitter expressed as % of inter-ocular distance —
+         makes the threshold resolution/zoom independent.
+      2. L/R Cross-Correlation: tracks left and right eyes *separately*.
+         Real eyes move in sync (high correlation). Deepfake eye overlays
+         sometimes drift independently (low correlation). This is a unique tell.
+      3. Coefficient of Variation (CV): measures jitter *burstiness*.
+         Human saccades are punctate snaps (HIGH CV = high variance / high mean).
+         Deepfake pupils drift smoothly (LOW CV = consistent linear motion).
     """
     mp_face_mesh = mp.solutions.face_mesh
-    jitter_values = []
-    all_frame_scores = []
 
-    # Step 1: Sample random frames across the full video (not consecutive)
     n_frames = len(frames)
-    sample_count = min(30, n_frames)  # Up to 30 randomly scattered frames
+    sample_count = min(30, n_frames)
     sample_indices = sorted(_random.sample(range(n_frames), sample_count))
 
-    pupil_coords = []  # List of (x, y) for each sampled frame that had a face
+    # Track left and right pupils independently
+    left_coords  = []  # (x, y) per sampled frame
+    right_coords = []
+    iid_values   = []  # Inter-Ocular Distance per frame (for normalization)
 
     with mp_face_mesh.FaceMesh(refine_landmarks=True, max_num_faces=1) as face_mesh:
         for idx in sample_indices:
@@ -47,40 +53,72 @@ def analyze(frames, fps=30.0, return_signals=False):
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = face_mesh.process(rgb)
             if results.multi_face_landmarks:
-                landmarks = results.multi_face_landmarks[0].landmark
-                pl = landmarks[PUPIL_LEFT]
-                pr = landmarks[PUPIL_RIGHT]
-                avg_x = (pl.x + pr.x) / 2
-                avg_y = (pl.y + pr.y) / 2
-                pupil_coords.append((avg_x, avg_y))
+                lm = results.multi_face_landmarks[0].landmark
+                pl = lm[PUPIL_LEFT]
+                pr = lm[PUPIL_RIGHT]
+                left_coords.append((pl.x, pl.y))
+                right_coords.append((pr.x, pr.y))
+                iid = np.sqrt((pl.x - pr.x)**2 + (pl.y - pr.y)**2)
+                iid_values.append(iid)
 
-    if len(pupil_coords) < 5:
+    if len(left_coords) < 5:
         return (0.5, {}) if return_signals else 0.5
 
-    # Step 2: Compute pairwise deltas between random pairs of sampled positions
-    # This measures whether the eye moved at all between distant points in time.
-    # Human eyes have chaotic, non-linear trajectories. Deepfakes have linear or frozen paths.
-    pts = np.array(pupil_coords)
-    deltas = np.diff(pts, axis=0)  # Step vectors between consecutive sampled positions
-    accel = np.diff(deltas, axis=0)  # Second derivative — acceleration (jitter)
-    
-    # Compute frame-level jitter as the magnitude of directional changes
-    jitter_magnitudes = np.linalg.norm(accel, axis=1) * 100  # Scale to readable px units
-    jitter_values = jitter_magnitudes.tolist()
-    jitter_avg = float(np.mean(jitter_magnitudes)) if len(jitter_magnitudes) > 0 else 0.0
-    
-    # Step 3: Score — Human (high non-linear jitter) = 0.0 suspicion (low score = more fake)
-    # Threshold: 0.25 is calibrated to typical human micro-saccade amplitudes
-    suspicion_score = 1.0 - np.clip(jitter_avg / 0.25, 0.0, 1.0)
+    iid_mean = float(np.mean(iid_values)) if iid_values else 0.065  # ~6.5% of frame width default
+
+    # ── PILLAR 1: IID-Normalised Jitter (acceleration magnitude) ──────────────
+    def iid_jitter(coords):
+        pts = np.array(coords)
+        deltas = np.diff(pts, axis=0)
+        accel  = np.diff(deltas, axis=0)
+        mags   = np.linalg.norm(accel, axis=1)
+        return mags / (iid_mean + 1e-6)  # express as fraction of IID
+
+    l_jitter = iid_jitter(left_coords)
+    r_jitter = iid_jitter(right_coords)
+
+    jitter_combined = np.concatenate([l_jitter, r_jitter])
+    jitter_avg      = float(np.mean(jitter_combined))
+
+    # ── PILLAR 2: L/R Cross-Correlation ───────────────────────────────────────
+    # Align lengths (both derived from same sample set minus 2 points for 2nd diff)
+    min_len = min(len(l_jitter), len(r_jitter))
+    if min_len >= 3:
+        lr_corr = float(np.corrcoef(l_jitter[:min_len], r_jitter[:min_len])[0, 1])
+        if np.isnan(lr_corr): lr_corr = 0.0
+    else:
+        lr_corr = 0.0
+
+    # High corr (> 0.5) = eyes move together = real. Low/negative corr = decoupled = deepfake.
+    corr_score = np.clip((lr_corr + 1.0) / 2.0, 0.0, 1.0)  # Map [-1,1] → [0,1]
+
+    # ── PILLAR 3: Coefficient of Variation (Burstiness) ───────────────────────
+    jitter_std = float(np.std(jitter_combined))
+    cv = jitter_std / (jitter_avg + 1e-6)
+    # Real: high CV (bursty snap-and-fixate). Deepfake: low CV (smooth drift).
+    # Threshold: CV > 0.8 indicates organic saccade pattern.
+    cv_score = np.clip(cv / 0.8, 0.0, 1.0)
+
+    # ── AGGREGATE ─────────────────────────────────────────────────────────────
+    # Jitter magnitude (IID-normalised): calibrated threshold is 0.05 IID units
+    mag_score = np.clip(jitter_avg / 0.05, 0.0, 1.0)
+
+    # Weighted ensemble of the 3 pillars (all pointing: 1.0 = human)
+    humanity = (mag_score * 0.40) + (corr_score * 0.35) + (cv_score * 0.25)
+    # Convert to suspicion then invert back to authenticity (main.py inverts again)
+    suspicion_score = 1.0 - float(np.clip(humanity, 0.0, 1.0))
     final_score = float(np.clip(suspicion_score, 0.0, 1.0))
 
     tags = {
         "score": final_score,
         "jitter_avg": jitter_avg,
-        "history": jitter_values,
+        "lr_correlation": lr_corr,
+        "cv_burstiness": cv,
+        "history": jitter_combined.tolist(),
         "verdict": "DEEPFAKE" if final_score > 0.5 else "HUMAN"
     }
     return (final_score, tags) if return_signals else final_score
+
 
 def plot_report(tags, score):
     """Generates a forensic biometric jitter report."""
