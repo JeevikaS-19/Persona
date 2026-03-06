@@ -19,59 +19,67 @@ def get_micro_jitter(history):
     accel = np.diff(diff, axis=0)
     return np.mean(np.abs(accel)) * 100 
 
+import random as _random
+
 def analyze(frames, fps=30.0, return_signals=False):
     """
-    Biometric Saccade Analysis v2.0 - Headless Forensic Specialist.
-    Detects eye micro-dynamics (saccades) to distinguish between human 
-    movement and robotic/frozen AI pupil overlays.
+    Biometric Saccade Analysis v3.0 - Random Frame Sampling.
+    Instead of a consecutive rolling window, we randomly sample frames
+    scattered across the video to compare pupil displacements.
+    Human eyes exhibit organic micro-jitter even between widely spaced frames,
+    while deepfake pupils tend to sit locked or move too linearly.
     """
     mp_face_mesh = mp.solutions.face_mesh
-    raw_pupil_history = deque(maxlen=20)
-    all_frame_scores = []
     jitter_values = []
-    
-    # Use refined landmarks for pupil tracking
+    all_frame_scores = []
+
+    # Step 1: Sample random frames across the full video (not consecutive)
+    n_frames = len(frames)
+    sample_count = min(30, n_frames)  # Up to 30 randomly scattered frames
+    sample_indices = sorted(_random.sample(range(n_frames), sample_count))
+
+    pupil_coords = []  # List of (x, y) for each sampled frame that had a face
+
     with mp_face_mesh.FaceMesh(refine_landmarks=True, max_num_faces=1) as face_mesh:
-        for idx, frame in enumerate(frames):
+        for idx in sample_indices:
+            frame = frames[idx]
             if frame is None: continue
-            
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = face_mesh.process(rgb)
-            
-            jitter_score = 0
             if results.multi_face_landmarks:
                 landmarks = results.multi_face_landmarks[0].landmark
-                
                 pl = landmarks[PUPIL_LEFT]
                 pr = landmarks[PUPIL_RIGHT]
                 avg_x = (pl.x + pr.x) / 2
                 avg_y = (pl.y + pr.y) / 2
-                
-                raw_pupil_history.append((avg_x, avg_y))
-                jitter_score = get_micro_jitter(list(raw_pupil_history))
-                jitter_values.append(jitter_score)
+                pupil_coords.append((avg_x, avg_y))
 
-                # Map jitter score to 0-1 suspicion scale
-                # Human (high jitter) = 0.0 suspicion | Deepfake (low jitter) = 1.0 suspicion
-                current_suspicion = 1 - (jitter_score / 0.25)
-                current_suspicion = np.clip(current_suspicion, 0, 1)
-                all_frame_scores.append(current_suspicion)
-            else:
-                # If no face is detected, we use neutral or previous state
-                if all_frame_scores:
-                    all_frame_scores.append(all_frame_scores[-1])
-
-    if not all_frame_scores:
+    if len(pupil_coords) < 5:
         return (0.5, {}) if return_signals else 0.5
-        
-    final_score = float(np.mean(all_frame_scores))
+
+    # Step 2: Compute pairwise deltas between random pairs of sampled positions
+    # This measures whether the eye moved at all between distant points in time.
+    # Human eyes have chaotic, non-linear trajectories. Deepfakes have linear or frozen paths.
+    pts = np.array(pupil_coords)
+    deltas = np.diff(pts, axis=0)  # Step vectors between consecutive sampled positions
+    accel = np.diff(deltas, axis=0)  # Second derivative — acceleration (jitter)
+    
+    # Compute frame-level jitter as the magnitude of directional changes
+    jitter_magnitudes = np.linalg.norm(accel, axis=1) * 100  # Scale to readable px units
+    jitter_values = jitter_magnitudes.tolist()
+    jitter_avg = float(np.mean(jitter_magnitudes)) if len(jitter_magnitudes) > 0 else 0.0
+    
+    # Step 3: Score — Human (high non-linear jitter) = 0.0 suspicion (low score = more fake)
+    # Threshold: 0.25 is calibrated to typical human micro-saccade amplitudes
+    suspicion_score = 1.0 - np.clip(jitter_avg / 0.25, 0.0, 1.0)
+    final_score = float(np.clip(suspicion_score, 0.0, 1.0))
+
     tags = {
         "score": final_score,
-        "jitter_avg": float(np.mean(jitter_values)) if jitter_values else 0.0,
+        "jitter_avg": jitter_avg,
         "history": jitter_values,
         "verdict": "DEEPFAKE" if final_score > 0.5 else "HUMAN"
     }
-    
     return (final_score, tags) if return_signals else final_score
 
 def plot_report(tags, score):

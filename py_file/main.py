@@ -253,37 +253,16 @@ async def analyze_video_production(video_path, source_type="upload", progress_ca
                 logger.error(f"Reflection Specialist Failure: {e}")
                 reflection_tags = {"error": str(e)}
 
-            # Specialist E: Keyframe Spatial Artifacts (Upload only — not meaningful for live webcam)
-            spatial_score = None
-            if source_type == "upload":
-                try:
-                    import random
-                    key_indices = random.sample(range(len(frames)), min(3, len(frames)))
-                    key_scores = []
-                    for idx in key_indices:
-                        var = cv2.Laplacian(frames[idx], cv2.CV_64F).var()
-                        key_scores.append(1.0 if var < 100 else 0.2)
-                    spatial_score = float(np.mean(key_scores))
-                    logger.info(f"Keyframe Strategy: Spatial audit (3 frames) complete. Score: {spatial_score}")
-                except Exception as e:
-                    logger.error(f"Spatial Specialist Failure: {e}")
-
             # Explicitly invert scores to be Authenticity Metrics (1.0 = Human, 0.0 = Deepfake)
             rppg_score = 1.0 - rppg_score
             sync_score = 1.0 - sync_score
             biometric_score = 1.0 - biometric_score
             reflection_score = 1.0 - reflection_score
             
-            # Final Summary (Ensemble weighted)
-            # Upload: rPPG(0.3) Sync(0.2) Bio(0.3) Refl(0.1) Spatial(0.1)
-            # Webcam: rPPG(0.35) Sync(0.25) Bio(0.30) Refl(0.10)  — no spatial
-            if spatial_score is not None:
-                spatial_score = 1.0 - spatial_score
-                ensemble_score = (rppg_score * 0.3) + (sync_score * 0.2) + (biometric_score * 0.3) + (reflection_score * 0.1) + (spatial_score * 0.1)
-            else:
-                ensemble_score = (rppg_score * 0.35) + (sync_score * 0.25) + (biometric_score * 0.30) + (reflection_score * 0.10)
+            # Final Ensemble: rPPG(0.35) Sync(0.25) Bio(0.30) Refl(0.10)
+            ensemble_score = (rppg_score * 0.35) + (sync_score * 0.25) + (biometric_score * 0.30) + (reflection_score * 0.10)
             
-            # Threshold inverted to match Authenticity scale (<= 0.35 means Deepfake)
+            # Threshold: <= 0.35 Authenticity = Deepfake
             classification = "DEEPFAKE" if ensemble_score <= 0.35 else "HUMAN"
             
             return {
@@ -294,8 +273,7 @@ async def analyze_video_production(video_path, source_type="upload", progress_ca
                     "rppg_score": round(float(rppg_score), 4),
                     "sync_score": round(float(sync_score), 4),
                     "biometric_score": round(float(biometric_score), 4),
-                     "reflection_score": round(float(reflection_score), 4),
-                    "spatial_score": round(spatial_score, 4) if spatial_score is not None else None,
+                    "reflection_score": round(float(reflection_score), 4),
                     "classification": classification
                 },
                 "environment": env,
@@ -407,8 +385,6 @@ async def run_cli_audit(source_type="webcam", file_path=None):
                 ("Bio   (Eye-Jitter)",    m["biometric_score"]),
                 ("Refl  (Corneal Phys.)", m["reflection_score"]),
             ]
-            if m.get("spatial_score") is not None:
-                specialists.append(("Spat  (AI Smoothness)", m["spatial_score"]))
             for name, s in specialists:
                 mini_bar = "█" * int(s * 20) + "░" * (20 - int(s * 20))
                 flag_sp  = " ⚠" if s <= 0.35 else "  "
