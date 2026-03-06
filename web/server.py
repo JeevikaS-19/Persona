@@ -12,6 +12,7 @@ from flask_cors import CORS
 
 # Add parent directory to path to import specialist modules
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../py_file')))
+import mediapipe_compat  # noqa — patches mp.solutions for mediapipe >= 0.10
 from main import analyze_video_production
 
 app = Flask(__name__)
@@ -204,4 +205,4 @@ def handle_upload(data):
         emit('error', {"message": str(e)})
 
 if __name__ == '__main__':
-    socketio.run(app, host='127.0.0.1', port=5011, debug=True, use_reloader=False)
+    socketio.run(app, host='127.0.0.1', port=5011, debug=True, use_reloader=False, allow_unsafe_werkzeug=True)
