@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Persona Sentinel - Cyber Forensics</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        body { background-color: #0a0a0a; color: #f4f4f5; font-family: 'Inter', sans-serif; overflow: hidden; }
+        .cyber-panel { background: #111111; border: 1px solid rgba(255,255,255,0.05); }
+        .chart-container::-webkit-scrollbar { display: none; }
+        .neon-red { box-shadow: inset 0 0 20px rgba(239, 68, 68, 0.15); border-color: rgba(239, 68, 68, 0.3); }
+        .neon-blue { box-shadow: inset 0 0 20px rgba(59, 130, 246, 0.15); border-color: rgba(59, 130, 246, 0.3); }
+        .neon-green { box-shadow: inset 0 0 20px rgba(16, 185, 129, 0.15); border-color: rgba(16, 185, 129, 0.3); }
+        .neon-purple { box-shadow: inset 0 0 20px rgba(168, 85, 247, 0.15); border-color: rgba(168, 85, 247, 0.3); }
+        canvas { filter: drop-shadow(0 0 8px rgba(255,255,255,0.1)); }
+    </style>
+</head>
+<body class="h-screen w-screen flex flex-col p-4 gap-4">
+
+    <!-- Header -->
+    <header class="flex justify-between items-center px-2 py-1">
+        <div class="flex items-center gap-3">
+            <i data-lucide="shield" class="h-6 w-6 text-blue-500"></i>
+            <h1 class="text-xl font-black tracking-tighter uppercase italic">Persona <span class="text-blue-500">Sentinel</span></h1>
+        </div>
+        <div class="flex items-center gap-4 text-xs font-mono text-zinc-500 tracking-widest">
+            <span class="flex items-center gap-2"><div class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div> ENGINE_STANDBY</span>
+            <span>ID: PERS-884D0</span>
+        </div>
+    </header>
+
+    <!-- Main Layout -->
+    <main class="flex-1 flex gap-4 h-[calc(100%-48px)]">
+        
+        <!-- LEFT PANEL: Video Viewport -->
+        <div class="w-1/2 h-full cyber-panel rounded-2xl overflow-hidden relative border-r border-zinc-800 bg-black">
+            <!-- Simulated Video Feed (Clean, no overlays) -->
+            <img src="https://images.unsplash.com/photo-1544005313-94ddf0286df2?q=80&w=1280&auto=format&fit=crop" class="w-full h-full object-cover grayscale opacity-60 contrast-125" alt="Subject Feed" />
+            <div class="absolute inset-x-0 bottom-4 text-center">
+                <span class="px-3 py-1 bg-black/80 backdrop-blur-md rounded border border-white/5 text-[10px] text-zinc-500 font-mono uppercase tracking-[0.2em]">DIRECT_FEED // 1080P // NO_OVERLAYS</span>
+            </div>
+        </div>
+
+        <!-- RIGHT PANEL: Tabbed Analytics -->
+        <div class="w-1/2 h-full cyber-panel rounded-2xl flex flex-col p-6 gap-6">
+            
+            <!-- Tabs -->
+            <div class="flex justify-between items-end border-b border-zinc-800 pb-4">
+                <div>
+                    <h2 class="text-lg font-bold text-white tracking-widest uppercase">Forensic Telemetry</h2>
+                    <p class="text-[10px] text-zinc-500 font-mono mt-1">Four-Pillar Architectural Analysis</p>
+                </div>
+                <div class="flex bg-black p-1 rounded-lg border border-zinc-800">
+                    <button onclick="switchTab('A')" id="btn-A" class="px-4 py-2 rounded-md font-bold text-[10px] tracking-wider transition-all text-zinc-500 hover:text-white">TAB A: AUTHENTICITY</button>
+                    <button onclick="switchTab('B')" id="btn-B" class="px-4 py-2 rounded-md font-bold text-[10px] tracking-wider transition-all bg-zinc-800 text-blue-400">TAB B: FORENSICS</button>
+                </div>
+            </div>
+
+            <!-- TAB A: Authenticity Gauge -->
+            <div id="tab-A" class="hidden flex-1 flex flex-col items-center justify-center animate-fade-in">
+                <h3 class="text-xs font-bold text-zinc-500 tracking-[0.3em] uppercase mb-12">Consensus Evaluation</h3>
+                
+                <div class="relative w-64 h-64 mb-16">
+                    <canvas id="gaugeChart"></canvas>
+                    <div class="absolute inset-0 flex flex-col items-center justify-center mt-8">
+                        <span class="text-6xl font-black tracking-tighter text-white">88<span class="text-2xl text-zinc-600">%</span></span>
+                        <span class="text-[10px] font-mono text-emerald-400 tracking-widest mt-2 uppercase">Probability</span>
+                    </div>
+                </div>
+
+                <div class="flex gap-4 w-full max-w-md">
+                    <div class="flex-1 p-4 rounded-xl border border-emerald-500/30 bg-emerald-500/5 shadow-[0_0_15px_rgba(16,185,129,0.1)] flex flex-col items-center justify-center text-center">
+                        <i data-lucide="activity" class="h-8 w-8 text-emerald-400 mb-2"></i>
+                        <span class="text-lg font-black text-emerald-400 tracking-widest">HUMAN</span>
+                    </div>
+                    <div class="flex-1 p-4 rounded-xl border border-zinc-800 bg-black/40 opacity-30 flex flex-col items-center justify-center text-center">
+                        <i data-lucide="alert-triangle" class="h-8 w-8 text-zinc-600 mb-2"></i>
+                        <span class="text-lg font-black text-zinc-500 tracking-widest">DEEPFAKE</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TAB B: 2x2 Forensic Charts -->
+            <div id="tab-B" class="flex-1 grid grid-cols-2 grid-rows-2 gap-4">
+                
+                <!-- Chart 1: Red Texture-Deviation Graph -->
+                <div class="cyber-panel neon-red rounded-xl p-4 flex flex-col">
+                    <p class="text-[9px] font-bold text-red-500 tracking-widest uppercase mb-2">Texture-Deviation <span class="text-zinc-600 ml-2">Var: 0.84</span></p>
+                    <div class="flex-1 relative w-full h-full"><canvas id="chart-texture"></canvas></div>
+                </div>
+
+                <!-- Chart 2: Motion-Vector Scatter Plot -->
+                <div class="cyber-panel neon-blue rounded-xl p-4 flex flex-col">
+                    <p class="text-[9px] font-bold text-blue-400 tracking-widest uppercase mb-2">Motion-Vector Map <span class="text-zinc-600 ml-2">Δ: 2.1mm</span></p>
+                    <div class="flex-1 relative w-full h-full"><canvas id="chart-motion"></canvas></div>
+                </div>
+
+                <!-- Chart 3: Green rPPG Pulse Wave -->
+                <div class="cyber-panel neon-green rounded-xl p-4 flex flex-col">
+                    <p class="text-[9px] font-bold text-emerald-400 tracking-widest uppercase mb-2">rPPG Pulse Wave <span class="text-zinc-600 ml-2">72 BPM</span></p>
+                    <div class="flex-1 relative w-full h-full"><canvas id="chart-rppg"></canvas></div>
+                </div>
+
+                <!-- Chart 4: Frequency-Domain Spectrogram -->
+                <div class="cyber-panel neon-purple rounded-xl p-4 flex flex-col">
+                    <p class="text-[9px] font-bold text-purple-400 tracking-widest uppercase mb-2">Frequency-Domain <span class="text-zinc-600 ml-2">10-40Hz Avg</span></p>
+                    <div class="flex-1 relative w-full h-full"><canvas id="chart-freq"></canvas></div>
+                </div>
+
+            </div>
+        </div>
+    </main>
+
+    <script>
+        lucide.createIcons();
+
+        function switchTab(tabId) {
+            document.getElementById('tab-A').classList.toggle('hidden', tabId !== 'A');
+            document.getElementById('tab-B').classList.toggle('hidden', tabId !== 'B');
+            
+            if (tabId === 'A') {
+                document.getElementById('btn-A').classList.replace('text-zinc-500', 'text-emerald-400');
+                document.getElementById('btn-A').classList.add('bg-zinc-800');
+                document.getElementById('btn-B').classList.replace('text-blue-400', 'text-zinc-500');
+                document.getElementById('btn-B').classList.remove('bg-zinc-800');
+            } else {
+                document.getElementById('btn-B').classList.replace('text-zinc-500', 'text-blue-400');
+                document.getElementById('btn-B').classList.add('bg-zinc-800');
+                document.getElementById('btn-A').classList.replace('text-emerald-400', 'text-zinc-500');
+                document.getElementById('btn-A').classList.remove('bg-zinc-800');
+            }
+        }
+
+        // --- Common Chart configuration ---
+        Chart.defaults.color = '#71717a';
+        Chart.defaults.font.family = 'Inter';
+        const hideAxes = { x: { display: false }, y: { display: true, border: {display: false}, grid: { color: 'rgba(255,255,255,0.05)' } } };
+        const noLegend = { legend: { display: false }, tooltip: { enabled: false } };
+
+        // Mock Data Generators
+        const generateSeries = (len, noise) => Array.from({length: len}, (_, i) => Math.sin(i/5) + (Math.random()*noise - noise/2));
+        const textureData = generateSeries(50, 2);
+        const rppgData = generateSeries(50, 0.2);
+        const freqData = Array.from({length: 30}, () => Math.random() * 100);
+        const motionData = Array.from({length: 40}, () => ({x: (Math.random()-0.5)*10, y: (Math.random()-0.5)*10}));
+
+        // 1. Red Texture-Deviation (Line area)
+        new Chart(document.getElementById('chart-texture').getContext('2d'), {
+            type: 'line',
+            data: {
+                labels: new Array(50).fill(''),
+                datasets: [{
+                    data: textureData, borderColor: '#ef4444', backgroundColor: 'rgba(239, 68, 68, 0.1)', fill: true, tension: 0.4, borderWidth: 2, pointRadius: 0
+                }]
+            },
+            options: { responsive: true, maintainAspectRatio: false, plugins: noLegend, scales: hideAxes }
+        });
+
+        // 2. Motion-Vector (Scatter)
+        new Chart(document.getElementById('chart-motion').getContext('2d'), {
+            type: 'scatter',
+            data: {
+                datasets: [{
+                    data: motionData, backgroundColor: '#60a5fa', borderColor: 'rgba(96, 165, 250, 0.5)', pointRadius: 3
+                }]
+            },
+            options: { 
+                responsive: true, maintainAspectRatio: false, plugins: noLegend, 
+                scales: { 
+                    x: { display: true, grid: { color: 'rgba(96,165,250,0.05)' } }, 
+                    y: { display: true, grid: { color: 'rgba(96,165,250,0.05)' } } 
+                } 
+            }
+        });
+
+        // 3. Green rPPG (Line area)
+        new Chart(document.getElementById('chart-rppg').getContext('2d'), {
+            type: 'line',
+            data: {
+                labels: new Array(50).fill(''),
+                datasets: [{
+                    data: rppgData, borderColor: '#10b981', backgroundColor: 'rgba(16, 185, 129, 0.1)', fill: true, tension: 0.4, borderWidth: 2, pointRadius: 0
+                }]
+            },
+            options: { responsive: true, maintainAspectRatio: false, plugins: noLegend, scales: hideAxes }
+        });
+
+        // 4. Purple Freq (Bar)
+        new Chart(document.getElementById('chart-freq').getContext('2d'), {
+            type: 'bar',
+            data: {
+                labels: new Array(30).fill(''),
+                datasets: [{ data: freqData, backgroundColor: '#c084fc', borderRadius: 2 }]
+            },
+            options: { responsive: true, maintainAspectRatio: false, plugins: noLegend, scales: hideAxes }
+        });
+
+        // TAB A: Gauge
+        new Chart(document.getElementById('gaugeChart').getContext('2d'), {
+            type: 'doughnut',
+            data: {
+                labels: ['Confidence', 'Buffer'],
+                datasets: [{
+                    data: [88, 12],
+                    backgroundColor: ['#10b981', 'rgba(255,255,255,0.02)'],
+                    borderWidth: 0,
+                    borderRadius: 20
+                }]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                cutout: '85%', rotation: -135, circumference: 270, plugins: noLegend
+            }
+        });
+    </script>
+</body>
+</html>
