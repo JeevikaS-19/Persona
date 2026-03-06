@@ -288,7 +288,7 @@ def plot_report(tags, score):
         # ── Header banner ──────────────────────────────────────────────────
         fig.text(0.5, 0.95, 'PERSONA · OPTICAL PHYSICS AUDIT',
                  ha='center', va='top', fontsize=11, color=TEXT_DIM,
-                 fontfamily='monospace', fontweight='bold', letterSpacing=4)  # type: ignore
+                 fontfamily='monospace', fontweight='bold')  # Removed letterSpacing (unsupported)
         fig.text(0.5, 0.90, f'Verdict  ·  {label}',
                  ha='center', va='top', fontsize=18, color=v_color, fontweight='bold')
 

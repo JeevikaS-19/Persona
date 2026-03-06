@@ -35,31 +35,38 @@ def analyze(frames, audio_data, sr=22050, fps=30.0, precomputed_landmarks=None):
     # Real speech has quasi-periodic rhythm (~2-5 syllables/s). Deepfakes are
     # often monotonous (no rhythm) or erratic (no periodicity).
     if audio_data is None:
-        mp_face_mesh = mp.solutions.face_mesh
+        stride = 1 if precomputed_landmarks is not None else 3
         v_dists = []
-        with mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1) as face_mesh:
-            for i in range(0, frame_count, 3):
-                res = face_mesh.process(cv2.cvtColor(frames[i], cv2.COLOR_BGR2RGB))
-                if res.multi_face_landmarks:
-                    l = res.multi_face_landmarks[0].landmark
-                    v = np.sqrt((l[13].x-l[14].x)**2 + (l[13].y-l[14].y)**2)
-                    scale = np.sqrt((l[10].x-l[152].x)**2 + (l[10].y-l[152].y)**2)
+        if precomputed_landmarks is not None:
+            for i in range(0, frame_count, stride):
+                lms = precomputed_landmarks[i] if i < len(precomputed_landmarks) else None
+                if lms is not None:
+                    v = np.sqrt((lms[13, 0] - lms[14, 0])**2 + (lms[13, 1] - lms[14, 1])**2)
+                    scale = np.sqrt((lms[10, 0] - lms[152, 0])**2 + (lms[10, 1] - lms[152, 1])**2)
                     v_dists.append(v / (scale + 1e-6))
                 else:
                     v_dists.append(v_dists[-1] if v_dists else 0.0)
+        else:
+            mp_face_mesh = mp.solutions.face_mesh
+            with mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1) as face_mesh:
+                for i in range(0, frame_count, stride):
+                    res = face_mesh.process(cv2.cvtColor(frames[i], cv2.COLOR_BGR2RGB))
+                    if res.multi_face_landmarks:
+                        l = res.multi_face_landmarks[0].landmark
+                        v = np.sqrt((l[13].x-l[14].x)**2 + (l[13].y-l[14].y)**2)
+                        scale = np.sqrt((l[10].x-l[152].x)**2 + (l[10].y-l[152].y)**2)
+                        v_dists.append(v / (scale + 1e-6))
+                    else:
+                        v_dists.append(v_dists[-1] if v_dists else 0.0)
         if len(v_dists) < 6:
             return 0.5, {}
         sig = np.array(v_dists) - np.mean(v_dists)
-        # Autocorrelation of lip signal — real speech has clear periodic peaks
         ac = np.correlate(sig, sig, mode='full')[len(sig)-1:]
         ac /= (ac[0] + 1e-6)
-        # Look for a peak in the 0.2-0.6s speech rhythm range
-        fps_decimated = (fps or 30.0) / 3
+        fps_decimated = (fps or 30.0) / stride
         lag_lo, lag_hi = int(0.2 * fps_decimated), int(0.6 * fps_decimated)
         lag_lo, lag_hi = max(1, lag_lo), min(lag_hi, len(ac)-1)
         rhythm_strength = float(np.max(ac[lag_lo:lag_hi])) if lag_hi > lag_lo else 0.0
-        # High rhythm_strength → organic speech → low suspicion
-        # sigmoid: rhythm=0.3 → ~0.5, rhythm=0.6 → ~0.12, rhythm=0.0 → ~0.9
         visual_suspicion = 1.0 / (1.0 + np.exp(15 * (rhythm_strength - 0.3)))
         score = float(np.clip(visual_suspicion, 0.0, 1.0))
         tags = {"score": score, "rhythm_strength": rhythm_strength,
@@ -254,6 +261,10 @@ def run_webcam():
     
     # Calculate actual FPS from recording
     actual_fps = len(frames) / duration
+    
+    # Task 1: Standardize Preprocessing (15 FPS + Tight Crop)
+    frames, actual_fps = preprocess_video(frames, actual_fps)
+    
     print(f"[*] Analyzing {len(frames)} frames (@{actual_fps:.1f} FPS) and {len(audio_data)} audio samples...")
     score, tags = analyze(frames, audio_data, fs_audio, fps=actual_fps)
     
@@ -276,6 +287,33 @@ def run_webcam():
     plt.tight_layout()
     plt.show()
 
+def preprocess_video(frames, fps):
+    """Mimic main.py optimization: 15 FPS + Tight Face Crop (224x224)"""
+    target_fps = 15.0
+    stride = max(1, int(fps / target_fps))
+    frames = frames[::stride]
+    actual_fps = fps / stride
+    
+    if not frames: return frames, actual_fps
+    
+    mp_face_detection = mp.solutions.face_detection
+    face_roi = None
+    with mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5) as face_detection:
+        results = face_detection.process(cv2.cvtColor(frames[0], cv2.COLOR_BGR2RGB))
+        if results.detections:
+            bbox = results.detections[0].location_data.relative_bounding_box
+            h, w, _ = frames[0].shape
+            x = int(max(0, (bbox.xmin - 0.1) * w))
+            y = int(max(0, (bbox.ymin - 0.1) * h))
+            xw = int(min(w, (bbox.width + 0.2) * w))
+            yh = int(min(h, (bbox.height + 0.2) * h))
+            face_roi = (x, y, xw, yh)
+
+    if face_roi:
+        x, y, w_roi, h_roi = face_roi
+        frames = [f[y:y+h_roi, x:x+w_roi] for f in frames]
+
+    return frames, actual_fps
 
 def run_file_upload(video_path=None):
     if not video_path:
@@ -300,6 +338,7 @@ def run_file_upload(video_path=None):
         sr = 22050
         
         cap = cv2.VideoCapture(video_path)
+        fps_orig = cap.get(cv2.CAP_PROP_FPS) or 30.0
         frames = []
         while cap.isOpened():
             ret, frame = cap.read()
@@ -307,11 +346,21 @@ def run_file_upload(video_path=None):
             frames.append(frame)
         cap.release()
         
-        # Robust FPS: Frames / Duration
-        fps = len(frames) / duration if duration > 0 else 30.0
+        # Task 1: Standardize Preprocessing (15 FPS + Tight Crop)
+        frames, actual_fps = preprocess_video(frames, fps_orig)
         
-        print(f"[*] Analyzing {len(frames)} frames (@{fps:.1f} FPS) and {len(audio)} audio samples...")
-        score, tags = analyze(frames, audio, sr, fps=fps)
+        # Task 4: Standardize Duration (main.py only processes first ~5 seconds)
+        max_frames = int(actual_fps * 5.0)
+        frames = frames[:max_frames]
+        
+        # Match audio duration to cropped frames using subclipped/slice to match main.py
+        if audio.size > 0:
+            audio_dur = len(frames) / actual_fps
+            audio_samples = int(audio_dur * sr)
+            audio = audio[:audio_samples]
+        
+        print(f"[*] Analyzing {len(frames)} frames (@{actual_fps:.1f} FPS) and {len(audio)} audio samples...")
+        score, tags = analyze(frames, audio, sr, fps=actual_fps)
         
         print("-" * 30)
         print(f"RESULT: {'DEEPFAKE' if score > 0.5 else 'HUMAN'}")

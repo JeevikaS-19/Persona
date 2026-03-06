@@ -54,20 +54,17 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0, env_flags=Non
     
     bg_means = []
     nose_y_first_pass = []  # Capture nose during ROI pass — avoids second FaceMesh open
-    stride_extraction = 3
+    is_cropped = (precomputed_landmarks is not None)
+    stride_extraction = 1 if is_cropped else max(1, int(fps / 15.0))
     
-    if precomputed_landmarks is not None:
-        stride_extraction = 1
+    if is_cropped:
         for i in range(0, frame_count, stride_extraction):
             frame = frames[i]
             if frame is None: continue
             h, w, _ = frame.shape
             
-            # 1. Global Background Sample (Corners)
-            bg_left = frame[10:60, 10:60]
-            bg_right = frame[10:60, w-60:w-10]
-            bg_avg = (cv2.mean(bg_left)[:3] + cv2.mean(bg_right)[:3])
-            bg_means.append([bg_avg[2]/2, bg_avg[1]/2, bg_avg[0]/2]) # RGB
+            # Disable background sampling since it's a tight face ROI
+            bg_means.append([0.0, 0.0, 0.0])
             
             lms = precomputed_landmarks[i] if i < len(precomputed_landmarks) else None
             if lms is None:
@@ -217,25 +214,44 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0, env_flags=Non
     peak_bpm = interpolate_peak(yf, xf, peak_idx_abs) * 60
     
     # v17.0 - Context & Background Analysis
-    bg_arr = np.array(bg_means)
-    bg_var_global = np.mean(np.var(bg_arr, axis=0))
-    # Spatial Continuity (Uniform Noise Check)
-    face_var_avg = np.mean([np.var(np.array(m)) for m in roi_means.values()])
-    noise_uniformity = abs(face_var_avg - bg_var_global) / (bg_var_global + 1e-6)
-    is_organic_grain = noise_uniformity < 0.4 and bg_var_global > 0.5
-    
-    # Use nose_y from first extraction pass (no second FaceMesh needed)
-    nose_y = nose_y_first_pass
-    anchor_correlation = 0.0
-    if len(nose_y) > 2 and len(bg_means) > 2:
-        bg_intensity = np.mean(bg_arr, axis=1)
-        n_y = np.array(nose_y)
-        bg_i = np.interp(np.linspace(0, 1, len(n_y)), np.linspace(0, 1, len(bg_intensity)), bg_intensity)
-        if np.std(n_y) > 1e-7 and np.std(bg_i) > 1e-7:
-            anchor_correlation = float(np.abs(np.corrcoef(n_y, bg_i)[0, 1]))
-    
-    # Global Motion (Handheld detection)
-    is_handheld = bg_var_global > 1.2 or anchor_correlation > 0.85
+    if is_cropped:
+        # Task 3: Background Noise Fix - Use internal reference (forehead) to calibrate lighting noise on tight crops
+        fh_arr = np.array(roi_means.get("forehead", []))
+        if len(fh_arr) > 0 and not np.any(np.isnan(fh_arr)):
+            bg_var_global = np.mean(np.var(fh_arr, axis=0))
+        else:
+            bg_var_global = 0.0
+            
+        # Check if cheeks have similar variance to forehead (uniform thermal/sensor noise)
+        cheeks_var = np.mean([np.var(np.array(m)) for k, m in roi_means.items() if "cheek" in k and len(m) > 0])
+        noise_uniformity = abs(cheeks_var - bg_var_global) / (bg_var_global + 1e-6)
+        is_organic_grain = noise_uniformity < 0.4 and bg_var_global > 0.5
+        
+        anchor_correlation = 0.0
+        is_handheld = env.get("shaky", False) or (bg_var_global > 2.0)
+    else:
+        bg_arr = np.array(bg_means)
+        if len(bg_arr) > 0:
+            bg_var_global = np.mean(np.var(bg_arr, axis=0))
+        else:
+            bg_var_global = 0.0
+        # Spatial Continuity (Uniform Noise Check)
+        face_var_avg = np.mean([np.var(np.array(m)) for m in roi_means.values()])
+        noise_uniformity = abs(face_var_avg - bg_var_global) / (bg_var_global + 1e-6)
+        is_organic_grain = noise_uniformity < 0.4 and bg_var_global > 0.5
+        
+        # Use nose_y from first extraction pass (no second FaceMesh needed)
+        nose_y = nose_y_first_pass
+        anchor_correlation = 0.0
+        if len(nose_y) > 2 and len(bg_means) > 2:
+            bg_intensity = np.mean(bg_arr, axis=1)
+            n_y = np.array(nose_y)
+            bg_i = np.interp(np.linspace(0, 1, len(n_y)), np.linspace(0, 1, len(bg_intensity)), bg_intensity)
+            if np.std(n_y) > 1e-7 and np.std(bg_i) > 1e-7:
+                anchor_correlation = float(np.abs(np.corrcoef(n_y, bg_i)[0, 1]))
+        
+        # Global Motion (Handheld detection)
+        is_handheld = bg_var_global > 1.2 or anchor_correlation > 0.85
     
     # Red-Dominance (Light quality signal)
     avg_rg_ratio = np.mean([v["rg_ratio"] for v in roi_data.values()])
@@ -352,83 +368,54 @@ def analyze(frames, return_signals=False, source="auto", fps=30.0, env_flags=Non
     # Diagnostic Print for Tuning (v17.0)
     print(f"[*] Forensic | Sine-C: {sine_correlation:.2f} | Anchor-C: {anchor_correlation:.2f} | R/G: {avg_rg_ratio:.2f} | Entropy: {spectral_entropy:.2f} | B-Grd: {grd_delta:.2f} | B-Ghost: {blue_pulse_strength:.2f}")
 
-    # --- v16.0 CONTEXT-AWARE SCORING MATRIX ---
-    score = 0.5
-    ai_hits = 0
+    # --- v17.1 CONTINUOUS WEIGHTED PROBABILITY SCORING ---
+    # Task 2: Replace binary score snapping with continuous sigmoid mapping
     
     # 1. Sine-Wave Perfection (Biological Impossibility)
-    if sine_correlation > 0.992: # Mathematically "Too Pure"
-        score += 0.5; ai_hits += 2
-    elif sine_correlation > 0.985:
-        score += 0.25; ai_hits += 1
-        
+    # Higher correlation = higher suspicion. Sigmoid centered around 0.985
+    sine_suspicion = 1.0 / (1.0 + np.exp(np.clip(-50 * (sine_correlation - 0.985), -200, 200)))
+    
     # 2. Fixed Frequency / HRV Stability
-    if ibi_std < 0.008: 
-        score += 0.45; ai_hits += 2
-    elif ibi_std < 0.015:
-        score += 0.2; ai_hits += 1
-
+    # Low std is bad. Centered around 0.012
+    hrv_suspicion = 1.0 / (1.0 + np.exp(np.clip(300 * (ibi_std - 0.012), -200, 200)))
+    
     # 3. Blue Ghosting / Channel Leakage
-    if blue_pulse_strength > 0.8: 
-        score += 0.45; ai_hits += 2
-    elif blue_pulse_strength > 0.6:
-        score += 0.2; ai_hits += 1
-
+    blue_suspicion = 1.0 / (1.0 + np.exp(np.clip(-15 * (blue_pulse_strength - 0.6), -200, 200)))
+    
     # 4. Motion-Pulse Correlation (Floating Overlay)
-    # Real pulses are disrupted by motion. AI overlays often remain constant.
-    # We ignore this if we detect shaky cam (since BVP is naturally noisy then).
-    if not is_handheld:
-        if motion_pulse_corr < 0.05: # Zero disruption = Overlay
-            score += 0.45; ai_hits += 2
-        elif motion_pulse_corr < 0.15:
-            score += 0.2; ai_hits += 1
-
-    # 5. Spatial Inconsistency (The Patchwork Test)
-    # Organic Chaos: Major relaxation for handheld noise
-    # Handheld humans (data_10) can have insane ROI Variance due to bin shift.
-    roi_thresh_high = 45.0 if is_handheld else (18.0 if is_organic_grain else 12.0)
-    roi_thresh_mid = 25.0 if is_handheld else (12.0 if is_organic_grain else 7.0)
-    
-    if roi_variance > roi_thresh_high: 
-        score += 0.5; ai_hits += 2
-    elif roi_variance > roi_thresh_mid:
-        score += 0.25; ai_hits += 1
-
-    # 6. Robotic Stability (Legacy Check)
-    if bpm_drift < 0.03: 
-        score += 0.35; ai_hits += 1
-
-    # --- BIOLOGICAL REWARDS (v17.0 Real World Aware) ---
-    reward_multiplier = 0.0 if ai_hits >= 2 else (0.5 if ai_hits == 1 else 1.0)
-    
-    # Reward Anchor Correlation (Camera Shake evidence)
-    if anchor_correlation > 0.85:
-        score -= 0.5 * reward_multiplier
-        
-    # Reward Natural Chaos (Handheld evidence)
     if is_handheld:
-        score -= 0.25 * reward_multiplier
+        overlay_suspicion = 0.0 # Handheld invalidates overlay check
+    else:
+        overlay_suspicion = 1.0 / (1.0 + np.exp(np.clip(40 * (motion_pulse_corr - 0.1), -200, 200)))
         
-    # Reward Uniform Grain (Sensor Noise evidence)
-    if is_organic_grain:
-        score -= 0.25 * reward_multiplier
-        
-    # Reward GRD (Green signal surviving in noise)
-    if grd_delta > 2.5:
-        score -= 0.35 * reward_multiplier
-        
-    # Reward Natural Complexity (Entropy & Channel Jitter)
-    if spectral_entropy > 1.8 and gr_lockstep < 0.99:
-        score -= 0.3 * reward_multiplier
-        
-    # Reward Natural Vitality (IBI Drift)
-    # Talking humans have drift. Shaky recordings have massive drift.
-    drift_limit_min = 0.5 if is_handheld else 2.0
-    drift_limit_max = 50.0 if is_handheld else 15.0
-    if drift_limit_min < bpm_drift < drift_limit_max and roi_variance < roi_thresh_high:
-        score -= 0.5 * reward_multiplier
+    # 5. Spatial Inconsistency (The Patchwork Test)
+    roi_thresh = 35.0 if is_handheld else (15.0 if is_organic_grain else 9.0)
+    spatial_suspicion = 1.0 / (1.0 + np.exp(np.clip(-0.2 * (roi_variance - roi_thresh), -200, 200)))
+    
+    # 6. Robotic Stability (Legacy Check)
+    drift_suspicion = 1.0 / (1.0 + np.exp(np.clip(100 * (bpm_drift - 0.04), -200, 200)))
 
-    final_score = float(np.clip(score, 0.0, 1.0))
+    # Weighted sum of suspicions (Weights total 1.0)
+    weights = {
+        "sine": 0.25,
+        "hrv": 0.20,
+        "blue": 0.20,
+        "overlay": 0.15,
+        "spatial": 0.15,
+        "drift": 0.05
+    }
+    
+    raw_score = (
+        sine_suspicion * weights["sine"] + 
+        hrv_suspicion * weights["hrv"] + 
+        blue_suspicion * weights["blue"] + 
+        overlay_suspicion * weights["overlay"] + 
+        spatial_suspicion * weights["spatial"] + 
+        drift_suspicion * weights["drift"]
+    )
+    
+    # Smooth decimal out mapping. Map [0.0, 1.0] to a wider sigmoid to stretch small changes.
+    final_score = float(1.0 / (1.0 + np.exp(np.clip(-10 * (raw_score - 0.45), -200, 200))))
     tags = {
         "filtered": master_bvp.tolist() if isinstance(master_bvp, np.ndarray) else master_bvp, 
         "xf": (xf*60).tolist(), "yf": yf.tolist(), "bpm": peak_bpm, 
@@ -473,11 +460,43 @@ def run_webcam():
     cap.release()
     if len(frames) >= 75:
         actual_fps = len(frames) / duration if duration > 0 else 30.0
+        
+        # Task 1: Standardize Preprocessing (15 FPS + Tight Crop)
+        frames, actual_fps = preprocess_video(frames, actual_fps)
+        
         print(f"[*] Analyzing {len(frames)} frames (@{actual_fps:.1f} FPS)...")
         score, sigs = analyze(frames, return_signals=True, source="webcam", fps=actual_fps)
         label = "DEEPFAKE" if score > 0.5 else "HUMAN"
         print(f"--- Result: {label} (Score: {score:.4f}) ---")
         plot_report(sigs, score)
+
+def preprocess_video(frames, fps):
+    """Mimic main.py optimization: 15 FPS + Tight Face Crop (224x224)"""
+    target_fps = 15.0
+    stride = max(1, int(fps / target_fps))
+    frames = frames[::stride]
+    actual_fps = fps / stride
+    
+    if not frames: return frames, actual_fps
+    
+    mp_face_detection = mp.solutions.face_detection
+    face_roi = None
+    with mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5) as face_detection:
+        results = face_detection.process(cv2.cvtColor(frames[0], cv2.COLOR_BGR2RGB))
+        if results.detections:
+            bbox = results.detections[0].location_data.relative_bounding_box
+            h, w, _ = frames[0].shape
+            x = int(max(0, (bbox.xmin - 0.1) * w))
+            y = int(max(0, (bbox.ymin - 0.1) * h))
+            xw = int(min(w, (bbox.width + 0.2) * w))
+            yh = int(min(h, (bbox.height + 0.2) * h))
+            face_roi = (x, y, xw, yh)
+
+    if face_roi:
+        x, y, w_roi, h_roi = face_roi
+        frames = [f[y:y+h_roi, x:x+w_roi] for f in frames]
+
+    return frames, actual_fps
 
 if __name__ == "__main__":
     import time
@@ -490,14 +509,23 @@ if __name__ == "__main__":
         if path:
             cap = cv2.VideoCapture(path); frames = []; fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
             print(f"Analyzing {path} at {fps:.1f} FPS...")
+            raw_frames = []
             while cap.get(cv2.CAP_PROP_POS_FRAMES) < cap.get(cv2.CAP_PROP_FRAME_COUNT):
                 ret, frame = cap.read()
                 if not ret: break
-                frames.append(frame)
-                if len(frames) >= 600: break
+                raw_frames.append(frame)
+                if len(raw_frames) >= 600: break
             cap.release()
-            if len(frames) >= 150:
-                score, sigs = analyze(frames, return_signals=True, source="upload", fps=fps)
+            
+            # Task 1: Standardize Preprocessing (15 FPS + Tight Crop)
+            frames, actual_fps = preprocess_video(raw_frames, fps)
+            
+            # Task 4: Standardize Duration (main.py only processes first ~5 seconds)
+            max_frames = int(actual_fps * 5.0)
+            frames = frames[:max_frames]
+            
+            if len(frames) >= 75:
+                score, sigs = analyze(frames, return_signals=True, source="upload", fps=actual_fps)
                 label = "DEEPFAKE" if score > 0.5 else "HUMAN"
                 print(f"\n--- Result: {label} (Score: {score:.4f}) ---")
                 plot_report(sigs, score)

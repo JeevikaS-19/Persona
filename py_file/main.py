@@ -154,31 +154,23 @@ async def analyze_video_production(video_path, source_type="upload", progress_ca
         if not os.path.exists(video_path):
             return {"status": "error", "message": "Source missing", "filename": filename}
             
+        orig_video_path = video_path  # Save original path for librosa to bypass AAC encode bugs
+        
         async with engine_semaphore:
             logger.info(f"Sentinel Audit Initiated: {filename}")
             
-            # Step 1: 5-Second Trimming (Memory Safety)
-            try:
-                from moviepy.video.io.VideoFileClip import VideoFileClip
-                temp_trim_path = video_path.replace('.', '_trimmed.')
-                with VideoFileClip(video_path) as clip:
-                    end = min(5, clip.duration)
-                    # moviepy v2.x renamed subclip -> subclipped
-                    trimmed = clip.subclipped(0, end) if hasattr(clip, 'subclipped') else clip.subclip(0, end)
-                    trimmed.write_videofile(temp_trim_path, codec="libx264", audio_codec="aac", logger=None)
-                video_path = temp_trim_path
-                logger.info("Trimmed to 5s for deployment stability.")
-            except Exception as e:
-                logger.warning(f"Trim failed, proceeding with raw: {e}")
-
-            # Step 2: Extract Frames (Headless)
-            cap = cv2.VideoCapture(video_path)
+            # Step 1: Initialization (Direct source reading to avoid re-encoding loss)
+            cap = cv2.VideoCapture(orig_video_path)
             orig_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
             raw_frames = []
-            while len(raw_frames) < 150: # Cap at ~15s max even if trim failed
+            
+            # Step 2: Extract Frames (Headless)
+            # We take up to 150 frames directly from source. At 30fps this is 5s.
+            # This ensures pixel-perfect parity with standalone tests.
+            while len(raw_frames) < 150:
                 ret, frame = cap.read()
                 if not ret: break
-                raw_frames.append(cv2.resize(frame, (320, 240)))  # Smaller = faster MediaPipe inference
+                raw_frames.append(frame)
             cap.release()
 
             if not raw_frames:
@@ -246,13 +238,31 @@ async def analyze_video_production(video_path, source_type="upload", progress_ca
                     env_flags=env, precomputed_landmarks=lm_data)
                 rppg_score, rppg_tags = rppg_data if isinstance(rppg_data, tuple) else (rppg_data, {})
             except Exception as e:
-                logger.error(f"rPPG Specialist Failure: {e}")
+                import traceback
+                logger.error(f"rPPG Specialist Failure: {e}\n{traceback.format_exc()}")
                 rppg_tags = {"error": str(e)}
 
             # Specialist B: Sync
             try:
-                import librosa
-                audio, sr = librosa.load(video_path, sr=22050, duration=5)
+                from moviepy.video.io.VideoFileClip import VideoFileClip
+                clip = VideoFileClip(orig_video_path)
+                if clip.audio is not None:
+                    # Precisely match audio duration to the processed frames duration
+                    exact_audio_duration = len(frames) / fs
+                    end_audio = min(exact_audio_duration, clip.duration)
+                    audio_sub = clip.audio.subclipped(0, end_audio) if hasattr(clip.audio, 'subclipped') else clip.audio.subclip(0, end_audio)
+                    audio = audio_sub.to_soundarray(fps=22050)
+                    if audio is not None and len(audio) > 0:
+                        if len(audio.shape) > 1 and audio.shape[1] > 1: 
+                            audio = audio.mean(axis=1)
+                        sr = 22050
+                    else:
+                        audio = np.array([])
+                        sr = 22050
+                else:
+                    audio = np.array([])
+                    sr = 22050
+
                 if audio.size > 0 and np.max(np.abs(audio)) > 0.005:
                     sync_data = await asyncio.to_thread(
                         analyze_sync, frames, audio, sr=sr, fps=fs,
@@ -264,7 +274,8 @@ async def analyze_video_production(video_path, source_type="upload", progress_ca
                         precomputed_landmarks=lm_data)
                     sync_score, sync_tags = sync_data if isinstance(sync_data, tuple) else (sync_data, {})
             except Exception as e:
-                logger.debug(f"Sync Specialist: no usable audio ({e or 'silent/no audio track'})")
+                import traceback
+                logger.error(f"Sync Specialist Failure: {e}\n{traceback.format_exc()}")
                 sync_tags = {"error": str(e)}
 
             # Specialist C: Biometric (Saccade)
@@ -275,7 +286,8 @@ async def analyze_video_production(video_path, source_type="upload", progress_ca
                     precomputed_landmarks=lm_data)
                 biometric_score, biometric_tags = biometric_data if isinstance(biometric_data, tuple) else (biometric_data, {})
             except Exception as e:
-                logger.error(f"Biometric Specialist Failure: {e}")
+                import traceback
+                logger.error(f"Biometric Specialist Failure: {e}\n{traceback.format_exc()}")
                 biometric_tags = {"error": str(e)}
 
             # Specialist D: Reflection
@@ -286,7 +298,8 @@ async def analyze_video_production(video_path, source_type="upload", progress_ca
                     precomputed_landmarks=lm_data)
                 reflection_score, reflection_tags = reflection_data if isinstance(reflection_data, tuple) else (reflection_data, {})
             except Exception as e:
-                logger.error(f"Reflection Specialist Failure: {e}")
+                import traceback
+                logger.error(f"Reflection Specialist Failure: {e}\n{traceback.format_exc()}")
                 reflection_tags = {"error": str(e)}
 
             # All specialists now return 0=human, 1=deepfake (suspicion scale)
